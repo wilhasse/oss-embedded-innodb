@@ -36,7 +36,9 @@ noinst_PROGRAMS		= ib_cfg \
 			  ib_test5 \
 			  ib_types \
 			  ib_update \
-			  ib_zip
+			  ib_zip \
+			  ib_bulk_insert \
+			  ib_simple_bulk
 if HAVE_PTHREAD_BARRIER
 noinst_PROGRAMS		+= ib_deadlock \
 			  ib_perf1
@@ -106,6 +108,8 @@ ib_cursor_SOURCES	= test0aux.c ib_cursor.c
 ib_logger_SOURCES	= test0aux.c ib_logger.c
 ib_update_SOURCES	= test0aux.c ib_update.c
 ib_zip_SOURCES		= test0aux.c ib_zip.c
+ib_bulk_insert_SOURCES	= test0aux.c ib_bulk_insert.c
+ib_simple_bulk_SOURCES	= test0aux.c ib_simple_bulk.c
 
 INCLUDES		= -I@top_srcdir@/include -I@top_srcdir@/tests
 
