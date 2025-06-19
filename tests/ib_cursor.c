@@ -294,31 +294,39 @@ int main(int argc, char* argv[])
 	ib_trx_t	ib_trx;
 	ib_tpl_t	tpl = NULL;
 
-	err = ib_init();
-	assert(err == DB_SUCCESS);
+        printf("Calling ib_init()\n");
+        err = ib_init();
+        assert(err == DB_SUCCESS);
 
-	test_configure();
+        test_configure();
 
-	err = ib_startup("barracuda");
-	assert(err == DB_SUCCESS);
+        printf("Calling ib_startup()\n");
+        err = ib_startup("barracuda");
+        assert(err == DB_SUCCESS);
 
-	err = create_database(DATABASE);
-	assert(err == DB_SUCCESS);
+        printf("Calling create_database()\n");
+        err = create_database(DATABASE);
+        assert(err == DB_SUCCESS);
 
-	err = create_table(DATABASE, TABLE);
-	assert(err == DB_SUCCESS);
+        printf("Calling create_table()\n");
+        err = create_table(DATABASE, TABLE);
+        assert(err == DB_SUCCESS);
 
-	ib_trx = ib_trx_begin(IB_TRX_REPEATABLE_READ);
-	assert(ib_trx != NULL);
+        printf("Starting transaction\n");
+        ib_trx = ib_trx_begin(IB_TRX_REPEATABLE_READ);
+        assert(ib_trx != NULL);
 
-	err = open_table(DATABASE, TABLE, ib_trx, &crsr);
-	assert(err == DB_SUCCESS);
+        printf("Opening table\n");
+        err = open_table(DATABASE, TABLE, ib_trx, &crsr);
+        assert(err == DB_SUCCESS);
 
-	err = ib_cursor_lock(crsr, IB_LOCK_IX);
-	assert(err == DB_SUCCESS);
+        printf("Locking cursor\n");
+        err = ib_cursor_lock(crsr, IB_LOCK_IX);
+        assert(err == DB_SUCCESS);
 
-	err = insert_rows(crsr);
-	assert(err == DB_SUCCESS);
+        printf("Inserting rows\n");
+        err = insert_rows(crsr);
+        assert(err == DB_SUCCESS);
 
 	/*==========================================*/
 	printf("SELECT * FROM T;\n");
