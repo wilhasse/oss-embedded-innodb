@@ -728,12 +728,16 @@ ib_init(void)
 {
 	ib_err_t	ib_err;
 
+	fprintf(stderr, "ib_init: start\n");
+
 	ut_mem_init();
+	fprintf(stderr, "ib_init: memory subsystem initialized\n");
 
 	ib_logger = (ib_logger_t) fprintf;
 	ib_stream = stderr;
 
 	ib_err = ib_cfg_init();
+	fprintf(stderr, "ib_init: ib_cfg_init returned %d\n", ib_err);
 
 	return(ib_err);
 }

@@ -1174,6 +1174,7 @@ ib_err_t
 innobase_start_or_create(void)
 /*===========================*/
 {
+	ib_logger(ib_stream, "innobase_start_or_create: begin\n");
 	buf_pool_t*	ret;
 	ibool		create_new_db;
 	ibool		log_file_created;

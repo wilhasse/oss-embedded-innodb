@@ -1282,8 +1282,9 @@ ib_err_t
 ib_cfg_init(void)
 /*=============*/
 {
-	/* Initialize the mutex that protects cfg_vars[]. */
-	os_fast_mutex_init(&cfg_vars_mutex);
+       fprintf(stderr, "ib_cfg_init: start\n");
+       /* Initialize the mutex that protects cfg_vars[]. */
+       os_fast_mutex_init(&cfg_vars_mutex);
 
 	ut_memcpy(cfg_vars, cfg_vars_defaults, sizeof(cfg_vars));
 
@@ -1316,10 +1317,12 @@ ib_cfg_init(void)
 	IB_CFG_SET("lru_block_access_recency", 0);
 	IB_CFG_SET("rollback_on_timeout", IB_TRUE);
 	IB_CFG_SET("read_io_threads", 4);
-	IB_CFG_SET("write_io_threads", 4);
+       IB_CFG_SET("write_io_threads", 4);
 #undef IB_CFG_SET
 
-	return(DB_SUCCESS);
+       fprintf(stderr, "ib_cfg_init: configuration defaults set\n");
+
+       return(DB_SUCCESS);
 }
 /* @} */
 
