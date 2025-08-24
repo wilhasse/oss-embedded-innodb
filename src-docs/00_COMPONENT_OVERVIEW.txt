@@ -1,0 +1,119 @@
+==================================================================
+INNODB COMPONENT ANALYSIS GUIDE
+==================================================================
+
+This collection contains the complete source code of InnoDB organized
+into logical components for deep analysis. Each file represents a major
+conceptual component of the storage engine.
+
+RECOMMENDED READING ORDER:
+---------------------------
+
+FOUNDATION CONCEPTS (Start Here):
+1. 21_universal_header.txt - Global definitions and constants
+2. 01_page_management.txt - The 16KB page structure (fundamental unit)
+3. 02_file_tablespace_management.txt - How pages are organized in files
+4. 03_buffer_pool.txt - In-memory page caching
+
+CORE DATA STRUCTURES:
+5. 05_record_data_formats.txt - How records are formatted
+6. 04_btree_index.txt - B+ tree implementation (all data stored here)
+7. 13_insert_buffer.txt - Change buffering optimization
+8. 14_adaptive_hash_index.txt - Hash index optimization
+
+TRANSACTION AND CONCURRENCY:
+9. 06_mini_transactions.txt - Atomic operations
+10. 07_logging_recovery.txt - Write-ahead logging (WAL)
+11. 08_transaction_system.txt - ACID and MVCC implementation
+12. 09_locking_system.txt - Concurrency control
+
+HIGH-LEVEL OPERATIONS:
+13. 10_row_operations.txt - Insert, update, delete, select
+14. 11_data_dictionary.txt - Schema and metadata
+15. 12_query_processing.txt - SQL-like query execution
+
+INFRASTRUCTURE:
+16. 15_synchronization.txt - Thread coordination
+17. 16_os_abstraction.txt - Platform independence
+18. 17_memory_management.txt - Custom memory allocators
+19. 18_utilities.txt - Common utilities
+20. 19_server_layer.txt - Background threads and services
+
+EXTERNAL INTERFACE:
+21. 20_api_layer.txt - Public API for applications
+
+KEY CONCEPTS TO UNDERSTAND:
+----------------------------
+
+1. PAGE-BASED ARCHITECTURE:
+   - Everything is stored in 16KB pages
+   - Pages contain records in specific formats
+   - Pages are organized into B+ trees
+
+2. BUFFER POOL:
+   - Acts as cache between disk and memory
+   - Uses LRU for page replacement
+   - Manages dirty page flushing
+
+3. B+ TREE INDEXES:
+   - All data stored in B+ tree indexes
+   - Clustered index contains actual data
+   - Secondary indexes point to clustered index
+
+4. MVCC (Multi-Version Concurrency Control):
+   - Each transaction sees consistent snapshot
+   - Old versions kept for concurrent readers
+   - Purge process cleans old versions
+
+5. WRITE-AHEAD LOGGING:
+   - Changes logged before written to data files
+   - Enables crash recovery
+   - Uses redo and undo logs
+
+6. MINI-TRANSACTIONS:
+   - Ensure atomicity of page modifications
+   - Generate redo log records
+   - Hold latches during operation
+
+7. LOCKING:
+   - Row-level locking for concurrency
+   - Next-key locking prevents phantoms
+   - Deadlock detection and resolution
+
+8. TRANSACTION ISOLATION:
+   - Four isolation levels supported
+   - Read views for consistent reads
+   - Undo logs for rollback
+
+ANALYSIS TIPS:
+--------------
+
+1. Start with page structure to understand physical layout
+2. Study B+ trees to understand logical organization
+3. Examine buffer pool for memory management
+4. Review transaction system for ACID properties
+5. Analyze locking for concurrency understanding
+6. Check logging for durability mechanisms
+7. Look at API layer for usage patterns
+
+Each component file contains both header files (interface) and
+implementation files (actual code). Headers are included first
+for understanding the design, followed by implementation details.
+
+DEPENDENCIES:
+-------------
+Most components depend on:
+- univ.i (universal definitions)
+- Page management
+- Memory management
+- OS abstraction
+- Synchronization primitives
+
+Higher-level components build on lower-level ones:
+- Row operations use B+ trees
+- B+ trees use pages
+- Pages use buffer pool
+- Buffer pool uses OS file I/O
+
+Understanding these dependencies helps in comprehending
+the overall architecture.

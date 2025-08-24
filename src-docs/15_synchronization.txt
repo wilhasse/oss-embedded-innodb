@@ -1,0 +1,6271 @@
+==================================================================
+COMPONENT: SYNCHRONIZATION PRIMITIVES
+==================================================================
+Low-level synchronization mechanisms for thread coordination
+and protecting shared data structures.
+
+Key concepts:
+- Mutexes and latches
+- Read-write locks
+- Sync arrays for wait management
+- Atomic operations
+- Thread local storage
+
+Files included:
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/sync0arr.h
+The wait array used in synchronization primitives
+
+Created 9/5/1995 Heikki Tuuri
+*******************************************************/
+
+#ifndef sync0arr_h
+#define sync0arr_h
+
+#include "univ.i"
+#include "ut0lst.h"
+#include "ut0mem.h"
+#include "os0thread.h"
+
+/** Synchronization wait array cell */
+typedef struct sync_cell_struct		sync_cell_t;
+/** Synchronization wait array */
+typedef struct sync_array_struct	sync_array_t;
+
+/** Parameters for sync_array_create() @{ */
+#define SYNC_ARRAY_OS_MUTEX	1	/*!< protected by os_mutex_t */
+#define SYNC_ARRAY_MUTEX	2	/*!< protected by mutex_t */
+/* @} */
+
+/*******************************************************************//**
+Creates a synchronization wait array. It is protected by a mutex
+which is automatically reserved when the functions operating on it
+are called.
+@return	own: created wait array */
+UNIV_INTERN
+sync_array_t*
+sync_array_create(
+/*==============*/
+	ulint	n_cells,	/*!< in: number of cells in the array
+				to create */
+	ulint	protection);	/*!< in: either SYNC_ARRAY_OS_MUTEX or
+				SYNC_ARRAY_MUTEX: determines the type
+				of mutex protecting the data structure */
+/******************************************************************//**
+Frees the resources in a wait array. */
+UNIV_INTERN
+void
+sync_array_free(
+/*============*/
+	sync_array_t*	arr);	/*!< in, own: sync wait array */
+/******************************************************************//**
+Reserves a wait array cell for waiting for an object.
+The event of the cell is reset to nonsignalled state. */
+UNIV_INTERN
+void
+sync_array_reserve_cell(
+/*====================*/
+	sync_array_t*	arr,	/*!< in: wait array */
+	void*		object, /*!< in: pointer to the object to wait for */
+	ulint		type,	/*!< in: lock request type */
+	const char*	file,	/*!< in: file where requested */
+	ulint		line,	/*!< in: line where requested */
+	ulint*		index); /*!< out: index of the reserved cell */
+/******************************************************************//**
+This function should be called when a thread starts to wait on
+a wait array cell. In the debug version this function checks
+if the wait for a semaphore will result in a deadlock, in which
+case prints info and asserts. */
+UNIV_INTERN
+void
+sync_array_wait_event(
+/*==================*/
+	sync_array_t*	arr,	/*!< in: wait array */
+	ulint		index);	 /*!< in: index of the reserved cell */
+/******************************************************************//**
+Frees the cell. NOTE! sync_array_wait_event frees the cell
+automatically! */
+UNIV_INTERN
+void
+sync_array_free_cell(
+/*=================*/
+	sync_array_t*	arr,	/*!< in: wait array */
+	ulint		index);	/*!< in: index of the cell in array */
+/**********************************************************************//**
+Note that one of the wait objects was signalled. */
+UNIV_INTERN
+void
+sync_array_object_signalled(
+/*========================*/
+	sync_array_t*	arr);	/*!< in: wait array */
+/**********************************************************************//**
+If the wakeup algorithm does not work perfectly at semaphore relases,
+this function will do the waking (see the comment in mutex_exit). This
+function should be called about every 1 second in the server. */
+UNIV_INTERN
+void
+sync_arr_wake_threads_if_sema_free(void);
+/*====================================*/
+/**********************************************************************//**
+Prints warnings of long semaphore waits to stderr.
+@return	TRUE if fatal semaphore wait threshold was exceeded */
+UNIV_INTERN
+ibool
+sync_array_print_long_waits(void);
+/*=============================*/
+/********************************************************************//**
+Validates the integrity of the wait array. Checks
+that the number of reserved cells equals the count variable. */
+UNIV_INTERN
+void
+sync_array_validate(
+/*================*/
+	sync_array_t*	arr);	/*!< in: sync wait array */
+/**********************************************************************//**
+Prints info of the wait array. */
+UNIV_INTERN
+void
+sync_array_print_info(
+/*==================*/
+	ib_stream_t	ib_stream,	/*!< in: stream where to print */
+	sync_array_t*	arr);		/*!< in: wait array */
+
+
+#ifndef UNIV_NONINL
+#include "sync0arr.ic"
+#endif
+
+#endif
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+Copyright (c) 2008, Google Inc.
+
+Portions of this file contain modifications contributed and copyrighted by
+Google, Inc. Those modifications are gratefully acknowledged and are described
+briefly in the InnoDB documentation. The contributions by Google are
+incorporated with their permission, and subject to the conditions contained in
+the file COPYING.Google.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/sync0rw.h
+The read-write lock (for threads, not for database transactions)
+
+Created 9/11/1995 Heikki Tuuri
+*******************************************************/
+
+#ifndef sync0rw_h
+#define sync0rw_h
+
+#include "univ.i"
+#ifndef UNIV_HOTBACKUP
+#include "ut0lst.h"
+#include "sync0sync.h"
+#include "os0sync.h"
+#endif /* !UNIV_HOTBACKUP */
+
+/* Latch types; these are used also in btr0btr.h: keep the numerical values
+smaller than 30 and the order of the numerical values like below! */
+#define RW_S_LATCH	1
+#define	RW_X_LATCH	2
+#define	RW_NO_LATCH	3
+
+#ifndef UNIV_HOTBACKUP
+/* We decrement lock_word by this amount for each x_lock. It is also the
+start value for the lock_word, meaning that it limits the maximum number
+of concurrent read locks before the rw_lock breaks. The current value of
+0x00100000 allows 1,048,575 concurrent readers and 2047 recursive writers.*/
+#define X_LOCK_DECR		0x00100000
+
+typedef struct rw_lock_struct		rw_lock_t;
+#ifdef UNIV_SYNC_DEBUG
+typedef struct rw_lock_debug_struct	rw_lock_debug_t;
+#endif /* UNIV_SYNC_DEBUG */
+
+typedef UT_LIST_BASE_NODE_T(rw_lock_t)	rw_lock_list_t;
+
+extern rw_lock_list_t	rw_lock_list;
+extern mutex_t		rw_lock_list_mutex;
+
+#ifdef UNIV_SYNC_DEBUG
+/* The global mutex which protects debug info lists of all rw-locks.
+To modify the debug info list of an rw-lock, this mutex has to be
+
+acquired in addition to the mutex protecting the lock. */
+extern mutex_t		rw_lock_debug_mutex;
+extern os_event_t	rw_lock_debug_event;	/*!< If deadlock detection does
+					not get immediately the mutex it
+					may wait for this event */
+extern ibool		rw_lock_debug_waiters;	/*!< This is set to TRUE, if
+					there may be waiters for the event */
+#endif /* UNIV_SYNC_DEBUG */
+
+/** number of spin waits on rw-latches,
+resulted during exclusive (write) locks */
+extern	ib_int64_t	rw_s_spin_wait_count;
+/** number of spin loop rounds on rw-latches,
+resulted during exclusive (write) locks */
+extern	ib_int64_t	rw_s_spin_round_count;
+/** number of unlocks (that unlock shared locks),
+set only when UNIV_SYNC_PERF_STAT is defined */
+extern	ib_int64_t	rw_s_exit_count;
+/** number of OS waits on rw-latches,
+resulted during shared (read) locks */
+extern	ib_int64_t	rw_s_os_wait_count;
+/** number of spin waits on rw-latches,
+resulted during shared (read) locks */
+extern	ib_int64_t	rw_x_spin_wait_count;
+/** number of spin loop rounds on rw-latches,
+resulted during shared (read) locks */
+extern	ib_int64_t	rw_x_spin_round_count;
+/** number of OS waits on rw-latches,
+resulted during exclusive (write) locks */
+extern	ib_int64_t	rw_x_os_wait_count;
+/** number of unlocks (that unlock exclusive locks),
+set only when UNIV_SYNC_PERF_STAT is defined */
+extern	ib_int64_t	rw_x_exit_count;
+
+/******************************************************************//**
+Creates, or rather, initializes an rw-lock object in a specified memory
+location (which must be appropriately aligned). The rw-lock is initialized
+to the non-locked state. Explicit freeing of the rw-lock with rw_lock_free
+is necessary only if the memory block containing it is freed. */
+#ifdef UNIV_DEBUG
+# ifdef UNIV_SYNC_DEBUG
+#  define rw_lock_create(L, level) 					\
+	rw_lock_create_func((L), (level), #L, __FILE__, __LINE__)
+# else /* UNIV_SYNC_DEBUG */
+#  define rw_lock_create(L, level) 					\
+	rw_lock_create_func((L), #L, __FILE__, __LINE__)
+# endif /* UNIV_SYNC_DEBUG */
+#else /* UNIV_DEBUG */
+# define rw_lock_create(L, level) 					\
+	rw_lock_create_func((L), __FILE__, __LINE__)
+#endif /* UNIV_DEBUG */
+
+/******************************************************************//**
+Creates, or rather, initializes an rw-lock object in a specified memory
+location (which must be appropriately aligned). The rw-lock is initialized
+to the non-locked state. Explicit freeing of the rw-lock with rw_lock_free
+is necessary only if the memory block containing it is freed. */
+UNIV_INTERN
+void
+rw_lock_create_func(
+/*================*/
+	rw_lock_t*	lock,		/*!< in: pointer to memory */
+#ifdef UNIV_DEBUG
+# ifdef UNIV_SYNC_DEBUG
+	ulint		level,		/*!< in: level */
+# endif /* UNIV_SYNC_DEBUG */
+	const char*	cmutex_name, 	/*!< in: mutex name */
+#endif /* UNIV_DEBUG */
+	const char*	cfile_name,	/*!< in: file name where created */
+	ulint 		cline);		/*!< in: file line where created */
+/******************************************************************//**
+Calling this function is obligatory only if the memory buffer containing
+the rw-lock is freed. Removes an rw-lock object from the global list. The
+rw-lock is checked to be in the non-locked state. */
+UNIV_INTERN
+void
+rw_lock_free(
+/*=========*/
+	rw_lock_t*	lock);	/*!< in: rw-lock */
+#ifdef UNIV_DEBUG
+/******************************************************************//**
+Checks that the rw-lock has been initialized and that there are no
+simultaneous shared and exclusive locks.
+@return	TRUE */
+UNIV_INTERN
+ibool
+rw_lock_validate(
+/*=============*/
+	rw_lock_t*	lock);	/*!< in: rw-lock */
+#endif /* UNIV_DEBUG */
+/**************************************************************//**
+NOTE! The following macros should be used in rw s-locking, not the
+corresponding function. */
+
+#define rw_lock_s_lock(M)	rw_lock_s_lock_func(\
+		(M), 0, __FILE__, __LINE__)
+/**************************************************************//**
+NOTE! The following macros should be used in rw s-locking, not the
+corresponding function. */
+
+#define rw_lock_s_lock_gen(M, P)	rw_lock_s_lock_func(\
+		(M), (P), __FILE__, __LINE__)
+/**************************************************************//**
+NOTE! The following macros should be used in rw s-locking, not the
+corresponding function. */
+
+#define rw_lock_s_lock_nowait(M, F, L)    rw_lock_s_lock_low(\
+					  (M), 0, (F), (L))
+/******************************************************************//**
+Low-level function which tries to lock an rw-lock in s-mode. Performs no
+spinning.
+@return	TRUE if success */
+UNIV_INLINE
+ibool
+rw_lock_s_lock_low(
+/*===============*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass __attribute__((unused)),
+				/*!< in: pass value; != 0, if the lock will be
+				passed to another thread to unlock */
+	const char*	file_name, /*!< in: file name where lock requested */
+	ulint		line);	/*!< in: line where requested */
+/******************************************************************//**
+NOTE! Use the corresponding macro, not directly this function, except if
+you supply the file name and line number. Lock an rw-lock in shared mode
+for the current thread. If the rw-lock is locked in exclusive mode, or
+there is an exclusive lock request waiting, the function spins a preset
+time (controlled by SYNC_SPIN_ROUNDS), waiting for the lock, before
+suspending the thread. */
+UNIV_INLINE
+void
+rw_lock_s_lock_func(
+/*================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass,	/*!< in: pass value; != 0, if the lock will
+				be passed to another thread to unlock */
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line);	/*!< in: line where requested */
+/******************************************************************//**
+NOTE! Use the corresponding macro, not directly this function! Lock an
+rw-lock in exclusive mode for the current thread if the lock can be
+obtained immediately.
+@return	TRUE if success */
+UNIV_INLINE
+ibool
+rw_lock_x_lock_func_nowait(
+/*=======================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line);	/*!< in: line where requested */
+/******************************************************************//**
+Releases a shared mode lock. */
+UNIV_INLINE
+void
+rw_lock_s_unlock_func(
+/*==================*/
+#ifdef UNIV_SYNC_DEBUG
+	ulint		pass,	/*!< in: pass value; != 0, if the lock may have
+				been passed to another thread to unlock */
+#endif
+	rw_lock_t*	lock);	/*!< in/out: rw-lock */
+
+#ifdef UNIV_SYNC_DEBUG
+# define rw_lock_s_unlock_gen(L, P)	rw_lock_s_unlock_func(P, L)
+#else
+# define rw_lock_s_unlock_gen(L, P)	rw_lock_s_unlock_func(L)
+#endif
+/*******************************************************************//**
+Releases a shared mode lock. */
+#define rw_lock_s_unlock(L)		rw_lock_s_unlock_gen(L, 0)
+
+/**************************************************************//**
+NOTE! The following macro should be used in rw x-locking, not the
+corresponding function. */
+
+#define rw_lock_x_lock(M)	rw_lock_x_lock_func(\
+		(M), 0, __FILE__, __LINE__)
+/**************************************************************//**
+NOTE! The following macro should be used in rw x-locking, not the
+corresponding function. */
+
+#define rw_lock_x_lock_gen(M, P)	rw_lock_x_lock_func(\
+		(M), (P), __FILE__, __LINE__)
+/**************************************************************//**
+NOTE! The following macros should be used in rw x-locking, not the
+corresponding function. */
+
+#define rw_lock_x_lock_nowait(M)	rw_lock_x_lock_func_nowait(\
+		(M), __FILE__, __LINE__)
+/******************************************************************//**
+NOTE! Use the corresponding macro, not directly this function! Lock an
+rw-lock in exclusive mode for the current thread. If the rw-lock is locked
+in shared or exclusive mode, or there is an exclusive lock request waiting,
+the function spins a preset time (controlled by SYNC_SPIN_ROUNDS), waiting
+for the lock, before suspending the thread. If the same thread has an x-lock
+on the rw-lock, locking succeed, with the following exception: if pass != 0,
+only a single x-lock may be taken on the lock. NOTE: If the same thread has
+an s-lock, locking does not succeed! */
+UNIV_INTERN
+void
+rw_lock_x_lock_func(
+/*================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass,	/*!< in: pass value; != 0, if the lock will
+				be passed to another thread to unlock */
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line);	/*!< in: line where requested */
+/******************************************************************//**
+Releases an exclusive mode lock. */
+UNIV_INLINE
+void
+rw_lock_x_unlock_func(
+/*==================*/
+#ifdef UNIV_SYNC_DEBUG
+	ulint		pass,	/*!< in: pass value; != 0, if the lock may have
+				been passed to another thread to unlock */
+#endif
+	rw_lock_t*	lock);	/*!< in/out: rw-lock */
+
+#ifdef UNIV_SYNC_DEBUG
+# define rw_lock_x_unlock_gen(L, P)	rw_lock_x_unlock_func(P, L)
+#else
+# define rw_lock_x_unlock_gen(L, P)	rw_lock_x_unlock_func(L)
+#endif
+/*******************************************************************//**
+Releases an exclusive mode lock. */
+#define rw_lock_x_unlock(L)		rw_lock_x_unlock_gen(L, 0)
+
+/******************************************************************//**
+Low-level function which locks an rw-lock in s-mode when we know that it
+is possible and none else is currently accessing the rw-lock structure.
+Then we can do the locking without reserving the mutex. */
+UNIV_INLINE
+void
+rw_lock_s_lock_direct(
+/*==================*/
+	rw_lock_t*	lock,		/*!< in/out: rw-lock */
+	const char*	file_name,	/*!< in: file name where requested */
+	ulint		line);		/*!< in: line where lock requested */
+/******************************************************************//**
+Low-level function which locks an rw-lock in x-mode when we know that it
+is not locked and none else is currently accessing the rw-lock structure.
+Then we can do the locking without reserving the mutex. */
+UNIV_INLINE
+void
+rw_lock_x_lock_direct(
+/*==================*/
+	rw_lock_t*	lock,		/*!< in/out: rw-lock */
+	const char*	file_name,	/*!< in: file name where requested */
+	ulint		line);		/*!< in: line where lock requested */
+/******************************************************************//**
+This function is used in the insert buffer to move the ownership of an
+x-latch on a buffer frame to the current thread. The x-latch was set by
+the buffer read operation and it protected the buffer frame while the
+read was done. The ownership is moved because we want that the current
+thread is able to acquire a second x-latch which is stored in an mtr.
+This, in turn, is needed to pass the debug checks of index page
+operations. */
+UNIV_INTERN
+void
+rw_lock_x_lock_move_ownership(
+/*==========================*/
+	rw_lock_t*	lock);	/*!< in: lock which was x-locked in the
+				buffer read */
+/******************************************************************//**
+Releases a shared mode lock when we know there are no waiters and none
+else will access the lock during the time this function is executed. */
+UNIV_INLINE
+void
+rw_lock_s_unlock_direct(
+/*====================*/
+	rw_lock_t*	lock);	/*!< in/out: rw-lock */
+/******************************************************************//**
+Releases an exclusive mode lock when we know there are no waiters, and
+none else will access the lock durint the time this function is executed. */
+UNIV_INLINE
+void
+rw_lock_x_unlock_direct(
+/*====================*/
+	rw_lock_t*	lock);	/*!< in/out: rw-lock */
+/******************************************************************//**
+Returns the value of writer_count for the lock. Does not reserve the lock
+mutex, so the caller must be sure it is not changed during the call.
+@return	value of writer_count */
+UNIV_INLINE
+ulint
+rw_lock_get_x_lock_count(
+/*=====================*/
+	const rw_lock_t*	lock);	/*!< in: rw-lock */
+/********************************************************************//**
+Check if there are threads waiting for the rw-lock.
+@return	1 if waiters, 0 otherwise */
+UNIV_INLINE
+ulint
+rw_lock_get_waiters(
+/*================*/
+	const rw_lock_t*	lock);	/*!< in: rw-lock */
+/******************************************************************//**
+Returns the write-status of the lock - this function made more sense
+with the old rw_lock implementation.
+@return	RW_LOCK_NOT_LOCKED, RW_LOCK_EX, RW_LOCK_WAIT_EX */
+UNIV_INLINE
+ulint
+rw_lock_get_writer(
+/*===============*/
+	const rw_lock_t*	lock);	/*!< in: rw-lock */
+/******************************************************************//**
+Returns the number of readers.
+@return	number of readers */
+UNIV_INLINE
+ulint
+rw_lock_get_reader_count(
+/*=====================*/
+	const rw_lock_t*	lock);	/*!< in: rw-lock */
+/******************************************************************//**
+Decrements lock_word the specified amount if it is greater than 0.
+This is used by both s_lock and x_lock operations.
+@return	TRUE if decr occurs */
+UNIV_INLINE
+ibool
+rw_lock_lock_word_decr(
+/*===================*/
+	rw_lock_t*	lock,		/*!< in/out: rw-lock */
+	ulint		amount);	/*!< in: amount to decrement */
+/******************************************************************//**
+Increments lock_word the specified amount and returns new value.
+@return	lock->lock_word after increment */
+UNIV_INLINE
+lint
+rw_lock_lock_word_incr(
+/*===================*/
+	rw_lock_t*	lock,		/*!< in/out: rw-lock */
+	ulint		amount);	/*!< in: amount to increment */
+/******************************************************************//**
+This function sets the lock->writer_thread and lock->recursive fields.
+For platforms where we are using atomic builtins instead of lock->mutex
+it sets the lock->writer_thread field using atomics to ensure memory
+ordering. Note that it is assumed that the caller of this function
+effectively owns the lock i.e.: nobody else is allowed to modify
+lock->writer_thread at this point in time.
+The protocol is that lock->writer_thread MUST be updated BEFORE the
+lock->recursive flag is set. */
+UNIV_INLINE
+void
+rw_lock_set_writer_id_and_recursion_flag(
+/*=====================================*/
+	rw_lock_t*	lock,		/*!< in/out: lock to work on */
+	ibool		recursive);	/*!< in: TRUE if recursion
+					allowed */
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Checks if the thread has locked the rw-lock in the specified mode, with
+the pass value == 0. */
+UNIV_INTERN
+ibool
+rw_lock_own(
+/*========*/
+	rw_lock_t*	lock,		/*!< in: rw-lock */
+	ulint		lock_type);	/*!< in: lock type: RW_LOCK_SHARED,
+					RW_LOCK_EX */
+#endif /* UNIV_SYNC_DEBUG */
+/******************************************************************//**
+Checks if somebody has locked the rw-lock in the specified mode. */
+UNIV_INTERN
+ibool
+rw_lock_is_locked(
+/*==============*/
+	rw_lock_t*	lock,		/*!< in: rw-lock */
+	ulint		lock_type);	/*!< in: lock type: RW_LOCK_SHARED,
+					RW_LOCK_EX */
+#ifdef UNIV_SYNC_DEBUG
+/***************************************************************//**
+Prints debug info of an rw-lock. */
+UNIV_INTERN
+void
+rw_lock_print(
+/*==========*/
+	rw_lock_t*	lock);	/*!< in: rw-lock */
+/***************************************************************//**
+Prints debug info of currently locked rw-locks. */
+UNIV_INTERN
+void
+rw_lock_list_print_info(
+/*====================*/
+	ib_stream_t	ib_stream);	/*!< in: stream where to print */
+/***************************************************************//**
+Returns the number of currently locked rw-locks.
+Works only in the debug version.
+@return	number of locked rw-locks */
+UNIV_INTERN
+ulint
+rw_lock_n_locked(void);
+/*==================*/
+
+/*#####################################################################*/
+
+/******************************************************************//**
+Acquires the debug mutex. We cannot use the mutex defined in sync0sync,
+because the debug mutex is also acquired in sync0arr while holding the OS
+mutex protecting the sync array, and the ordinary mutex_enter might
+recursively call routines in sync0arr, leading to a deadlock on the OS
+mutex. */
+UNIV_INTERN
+void
+rw_lock_debug_mutex_enter(void);
+/*==========================*/
+/******************************************************************//**
+Releases the debug mutex. */
+UNIV_INTERN
+void
+rw_lock_debug_mutex_exit(void);
+/*==========================*/
+/*********************************************************************//**
+Prints info of a debug struct. */
+UNIV_INTERN
+void
+rw_lock_debug_print(
+/*================*/
+	rw_lock_debug_t*	info);	/*!< in: debug struct */
+#endif /* UNIV_SYNC_DEBUG */
+/**********************************************************************
+Reset the variables. */
+UNIV_INTERN
+void
+rw_lock_var_init(void);
+/*==================*/
+
+/* NOTE! The structure appears here only for the compiler to know its size.
+Do not use its fields directly! */
+
+/** The structure used in the spin lock implementation of a read-write
+lock. Several threads may have a shared lock simultaneously in this
+lock, but only one writer may have an exclusive lock, in which case no
+shared locks are allowed. To prevent starving of a writer blocked by
+readers, a writer may queue for x-lock by decrementing lock_word: no
+new readers will be let in while the thread waits for readers to
+exit. */
+struct rw_lock_struct {
+	volatile lint	lock_word;
+				/*!< Holds the state of the lock. */
+	volatile ulint	waiters;/*!< 1: there are waiters */
+	volatile ibool	recursive;/*!< Default value FALSE which means the lock
+				is non-recursive. The value is typically set
+				to TRUE making normal rw_locks recursive. In
+				case of asynchronous IO, when a non-zero
+				value of 'pass' is passed then we keep the
+				lock non-recursive.
+				This flag also tells us about the state of
+				writer_thread field. If this flag is set
+				then writer_thread MUST contain the thread
+				id of the current x-holder or wait-x thread.
+				This flag must be reset in x_unlock
+				functions before incrementing the lock_word */
+	volatile os_thread_id_t	writer_thread;
+				/*!< Thread id of writer thread. Is only
+				guaranteed to have sane and non-stale
+				value iff recursive flag is set. */
+	os_event_t	event;	/*!< Used by sync0arr.c for thread queueing */
+	os_event_t	wait_ex_event;
+				/*!< Event for next-writer to wait on. A thread
+				must decrement lock_word before waiting. */
+#ifndef INNODB_RW_LOCKS_USE_ATOMICS
+	mutex_t	mutex;		/*!< The mutex protecting rw_lock_struct */
+#endif /* INNODB_RW_LOCKS_USE_ATOMICS */
+
+	UT_LIST_NODE_T(rw_lock_t) list;
+				/*!< All allocated rw locks are put into a
+				list */
+#ifdef UNIV_SYNC_DEBUG
+	UT_LIST_BASE_NODE_T(rw_lock_debug_t) debug_list;
+				/*!< In the debug version: pointer to the debug
+				info list of the lock */
+	ulint	level;		/*!< Level in the global latching order. */
+#endif /* UNIV_SYNC_DEBUG */
+	ulint count_os_wait;	/*!< Count of os_waits. May not be accurate */
+	const char*	cfile_name;/*!< File name where lock created */
+        /* last s-lock file/line is not guaranteed to be correct */
+	const char*	last_s_file_name;/*!< File name where last s-locked */
+	const char*	last_x_file_name;/*!< File name where last x-locked */
+	ibool		writer_is_wait_ex;
+				/*!< This is TRUE if the writer field is
+				RW_LOCK_WAIT_EX; this field is located far
+				from the memory update hotspot fields which
+				are at the start of this struct, thus we can
+				peek this field without causing much memory
+				bus traffic */
+	unsigned	cline:14;	/*!< Line where created */
+	unsigned	last_s_line:14;	/*!< Line number where last time s-locked */
+	unsigned	last_x_line:14;	/*!< Line number where last time x-locked */
+	ulint	magic_n;	/*!< RW_LOCK_MAGIC_N */
+};
+
+/** Value of rw_lock_struct::magic_n */
+#define	RW_LOCK_MAGIC_N	22643
+
+#ifdef UNIV_SYNC_DEBUG
+/** The structure for storing debug info of an rw-lock */
+struct	rw_lock_debug_struct {
+
+	os_thread_id_t thread_id;  /*!< The thread id of the thread which
+				locked the rw-lock */
+	ulint	pass;		/*!< Pass value given in the lock operation */
+	ulint	lock_type;	/*!< Type of the lock: RW_LOCK_EX,
+				RW_LOCK_SHARED, RW_LOCK_WAIT_EX */
+	const char*	file_name;/*!< File name where the lock was obtained */
+	ulint	line;		/*!< Line where the rw-lock was locked */
+	UT_LIST_NODE_T(rw_lock_debug_t) list;
+				/*!< Debug structs are linked in a two-way
+				list */
+};
+#endif /* UNIV_SYNC_DEBUG */
+
+#ifndef UNIV_NONINL
+#include "sync0rw.ic"
+#endif
+#endif /* !UNIV_HOTBACKUP */
+
+#endif
+/*****************************************************************************
+
+Copyright (c) 1995, 2010, Innobase Oy. All Rights Reserved.
+Copyright (c) 2008, Google Inc.
+
+Portions of this file contain modifications contributed and copyrighted by
+Google, Inc. Those modifications are gratefully acknowledged and are described
+briefly in the InnoDB documentation. The contributions by Google are
+incorporated with their permission, and subject to the conditions contained in
+the file COPYING.Google.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/sync0sync.h
+Mutex, the basic synchronization primitive
+
+Created 9/5/1995 Heikki Tuuri
+*******************************************************/
+
+#ifndef sync0sync_h
+#define sync0sync_h
+
+#include "univ.i"
+#include "sync0types.h"
+#include "ut0lst.h"
+#include "ut0mem.h"
+#include "os0thread.h"
+#include "os0sync.h"
+#include "sync0arr.h"
+
+#ifdef HAVE_WINDOWS_ATOMICS
+typedef LONG lock_word_t;	/*!< On Windows, InterlockedExchange operates
+				on LONG variable */
+#else
+typedef byte lock_word_t;
+#endif
+
+/******************************************************************//**
+Initializes the synchronization data structures. */
+UNIV_INTERN
+void
+sync_init(void);
+/*===========*/
+/******************************************************************//**
+Frees the resources in synchronization data structures. */
+UNIV_INTERN
+void
+sync_close(void);
+/*===========*/
+/******************************************************************//**
+Creates, or rather, initializes a mutex object to a specified memory
+location (which must be appropriately aligned). The mutex is initialized
+in the reset state. Explicit freeing of the mutex with mutex_free is
+necessary only if the memory block containing it is freed. */
+
+#ifdef UNIV_DEBUG
+# ifdef UNIV_SYNC_DEBUG
+#  define mutex_create(M, level)					\
+	mutex_create_func((M), #M, (level), __FILE__, __LINE__)
+# else
+#  define mutex_create(M, level)					\
+	mutex_create_func((M), #M, __FILE__, __LINE__)
+# endif
+#else
+# define mutex_create(M, level)					\
+	mutex_create_func((M), __FILE__, __LINE__)
+#endif
+
+/******************************************************************//**
+Creates, or rather, initializes a mutex object in a specified memory
+location (which must be appropriately aligned). The mutex is initialized
+in the reset state. Explicit freeing of the mutex with mutex_free is
+necessary only if the memory block containing it is freed. */
+UNIV_INTERN
+void
+mutex_create_func(
+/*==============*/
+	mutex_t*	mutex,		/*!< in: pointer to memory */
+#ifdef UNIV_DEBUG
+	const char*	cmutex_name,	/*!< in: mutex name */
+# ifdef UNIV_SYNC_DEBUG
+	ulint		level,		/*!< in: level */
+# endif /* UNIV_SYNC_DEBUG */
+#endif /* UNIV_DEBUG */
+	const char*	cfile_name,	/*!< in: file name where created */
+	ulint		cline);		/*!< in: file line where created */
+
+#undef mutex_free			/* Fix for MacOS X */
+
+/******************************************************************//**
+Calling this function is obligatory only if the memory buffer containing
+the mutex is freed. Removes a mutex object from the mutex list. The mutex
+is checked to be in the reset state. */
+UNIV_INTERN
+void
+mutex_free(
+/*=======*/
+	mutex_t*	mutex);	/*!< in: mutex */
+/**************************************************************//**
+NOTE! The following macro should be used in mutex locking, not the
+corresponding function. */
+
+#define mutex_enter(M)	  mutex_enter_func((M), __FILE__, __LINE__)
+/**************************************************************//**
+NOTE! The following macro should be used in mutex locking, not the
+corresponding function. */
+
+/* NOTE! currently same as mutex_enter! */
+
+#define mutex_enter_fast(M)	mutex_enter_func((M), __FILE__, __LINE__)
+/******************************************************************//**
+NOTE! Use the corresponding macro in the header file, not this function
+directly. Locks a mutex for the current thread. If the mutex is reserved
+the function spins a preset time (controlled by SYNC_SPIN_ROUNDS) waiting
+for the mutex before suspending the thread. */
+UNIV_INLINE
+void
+mutex_enter_func(
+/*=============*/
+	mutex_t*	mutex,		/*!< in: pointer to mutex */
+	const char*	file_name,	/*!< in: file name where locked */
+	ulint		line);		/*!< in: line where locked */
+/**************************************************************//**
+NOTE! The following macro should be used in mutex locking, not the
+corresponding function. */
+
+#define mutex_enter_nowait(M)	\
+	mutex_enter_nowait_func((M), __FILE__, __LINE__)
+/********************************************************************//**
+NOTE! Use the corresponding macro in the header file, not this function
+directly. Tries to lock the mutex for the current thread. If the lock is not
+acquired immediately, returns with return value 1.
+@return	0 if succeed, 1 if not */
+UNIV_INTERN
+ulint
+mutex_enter_nowait_func(
+/*====================*/
+	mutex_t*	mutex,		/*!< in: pointer to mutex */
+	const char*	file_name,	/*!< in: file name where mutex
+					requested */
+	ulint		line);		/*!< in: line where requested */
+/******************************************************************//**
+Unlocks a mutex owned by the current thread. */
+UNIV_INLINE
+void
+mutex_exit(
+/*=======*/
+	mutex_t*	mutex);	/*!< in: pointer to mutex */
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Returns TRUE if no mutex or rw-lock is currently locked.
+Works only in the debug version.
+@return	TRUE if no mutexes and rw-locks reserved */
+UNIV_INTERN
+ibool
+sync_all_freed(void);
+/*================*/
+#endif /* UNIV_SYNC_DEBUG */
+/*#####################################################################
+FUNCTION PROTOTYPES FOR DEBUGGING */
+/*******************************************************************//**
+Prints wait info of the sync system. */
+UNIV_INTERN
+void
+sync_print_wait_info(
+/*=================*/
+	ib_stream_t	ib_stream);	/*!< in: stream where to print */
+/*******************************************************************//**
+Prints info of the sync system. */
+UNIV_INTERN
+void
+sync_print(
+/*=======*/
+	ib_stream_t	ib_stream);	/*!< in: stream where to print */
+#ifdef UNIV_DEBUG
+/******************************************************************//**
+Checks that the mutex has been initialized.
+@return	TRUE */
+UNIV_INTERN
+ibool
+mutex_validate(
+/*===========*/
+	const mutex_t*	mutex);	/*!< in: mutex */
+/******************************************************************//**
+Checks that the current thread owns the mutex. Works only
+in the debug version.
+@return	TRUE if owns */
+UNIV_INTERN
+ibool
+mutex_own(
+/*======*/
+	const mutex_t*	mutex);	/*!< in: mutex */
+#endif /* UNIV_DEBUG */
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Adds a latch and its level in the thread level array. Allocates the memory
+for the array if called first time for this OS thread. Makes the checks
+against other latch levels stored in the array for this thread. */
+UNIV_INTERN
+void
+sync_thread_add_level(
+/*==================*/
+	void*	latch,	/*!< in: pointer to a mutex or an rw-lock */
+	ulint	level);	/*!< in: level in the latching order; if
+			SYNC_LEVEL_VARYING, nothing is done */
+/******************************************************************//**
+Removes a latch from the thread level array if it is found there.
+@return TRUE if found in the array; it is no error if the latch is
+not found, as we presently are not able to determine the level for
+every latch reservation the program does */
+UNIV_INTERN
+ibool
+sync_thread_reset_level(
+/*====================*/
+	void*	latch);	/*!< in: pointer to a mutex or an rw-lock */
+/******************************************************************//**
+Checks that the level array for the current thread is empty.
+@return	TRUE if empty */
+UNIV_INTERN
+ibool
+sync_thread_levels_empty(void);
+/*==========================*/
+/******************************************************************//**
+Checks if the level array for the current thread contains a
+mutex or rw-latch at the specified level.
+@return	a matching latch, or NULL if not found */
+UNIV_INTERN
+void*
+sync_thread_levels_contains(
+/*========================*/
+	ulint	level);			/*!< in: latching order level
+					(SYNC_DICT, ...)*/
+/******************************************************************//**
+Checks if the level array for the current thread is empty.
+@return	a latch, or NULL if empty except the exceptions specified below */
+UNIV_INTERN
+void*
+sync_thread_levels_nonempty_gen(
+/*============================*/
+	ibool	dict_mutex_allowed);	/*!< in: TRUE if dictionary mutex is
+					allowed to be owned by the thread,
+					also purge_is_running mutex is
+					allowed */
+#define sync_thread_levels_empty_gen(d) (!sync_thread_levels_nonempty_gen(d))
+/******************************************************************//**
+Gets the debug information for a reserved mutex. */
+UNIV_INTERN
+void
+mutex_get_debug_info(
+/*=================*/
+	mutex_t*	mutex,		/*!< in: mutex */
+	const char**	file_name,	/*!< out: file where requested */
+	ulint*		line,		/*!< out: line where requested */
+	os_thread_id_t* thread_id);	/*!< out: id of the thread which owns
+					the mutex */
+/******************************************************************//**
+Counts currently reserved mutexes. Works only in the debug version.
+@return	number of reserved mutexes */
+UNIV_INTERN
+ulint
+mutex_n_reserved(void);
+/*==================*/
+#endif /* UNIV_SYNC_DEBUG */
+/******************************************************************//**
+NOT to be used outside this module except in debugging! Gets the value
+of the lock word. */
+UNIV_INLINE
+lock_word_t
+mutex_get_lock_word(
+/*================*/
+	const mutex_t*	mutex);	/*!< in: mutex */
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+NOT to be used outside this module except in debugging! Gets the waiters
+field in a mutex.
+@return	value to set */
+UNIV_INLINE
+ulint
+mutex_get_waiters(
+/*==============*/
+	const mutex_t*	mutex);	/*!< in: mutex */
+#endif /* UNIV_SYNC_DEBUG */
+/**********************************************************************
+Reset variables. */
+UNIV_INTERN
+void
+sync_var_init(void);
+/*===============*/
+
+/*
+		LATCHING ORDER WITHIN THE DATABASE
+		==================================
+
+The mutex or latch in the central memory object, for instance, a rollback
+segment object, must be acquired before acquiring the latch or latches to
+the corresponding file data structure. In the latching order below, these
+file page object latches are placed immediately below the corresponding
+central memory object latch or mutex.
+
+Synchronization object			Notes
+----------------------			-----
+
+Dictionary mutex			If we have a pointer to a dictionary
+|					object, e.g., a table, it can be
+|					accessed without reserving the
+|					dictionary mutex. We must have a
+|					reservation, a memoryfix, to the
+|					appropriate table object in this case,
+|					and the table must be explicitly
+|					released later.
+V
+Dictionary header
+|
+V
+Secondary index tree latch		The tree latch protects also all
+|					the B-tree non-leaf pages. These
+V					can be read with the page only
+Secondary index non-leaf		bufferfixed to save CPU time,
+|					no s-latch is needed on the page.
+|					Modification of a page requires an
+|					x-latch on the page, however. If a
+|					thread owns an x-latch to the tree,
+|					it is allowed to latch non-leaf pages
+|					even after it has acquired the fsp
+|					latch.
+V
+Secondary index leaf			The latch on the secondary index leaf
+|					can be kept while accessing the
+|					clustered index, to save CPU time.
+V
+Clustered index tree latch		To increase concurrency, the tree
+|					latch is usually released when the
+|					leaf page latch has been acquired.
+V
+Clustered index non-leaf
+|
+V
+Clustered index leaf
+|
+V
+Transaction system header
+|
+V
+Transaction undo mutex			The undo log entry must be written
+|					before any index page is modified.
+|					Transaction undo mutex is for the undo
+|					logs the analogue of the tree latch
+|					for a B-tree. If a thread has the
+|					trx undo mutex reserved, it is allowed
+|					to latch the undo log pages in any
+|					order, and also after it has acquired
+|					the fsp latch.
+V
+Rollback segment mutex			The rollback segment mutex must be
+|					reserved, if, e.g., a new page must
+|					be added to an undo log. The rollback
+|					segment and the undo logs in its
+|					history list can be seen as an
+|					analogue of a B-tree, and the latches
+|					reserved similarly, using a version of
+|					lock-coupling. If an undo log must be
+|					extended by a page when inserting an
+|					undo log record, this corresponds to
+|					a pessimistic insert in a B-tree.
+V
+Rollback segment header
+|
+V
+Purge system latch
+|
+V
+Undo log pages				If a thread owns the trx undo mutex,
+|					or for a log in the history list, the
+|					rseg mutex, it is allowed to latch
+|					undo log pages in any order, and even
+|					after it has acquired the fsp latch.
+|					If a thread does not have the
+|					appropriate mutex, it is allowed to
+|					latch only a single undo log page in
+|					a mini-transaction.
+V
+File space management latch		If a mini-transaction must allocate
+|					several file pages, it can do that,
+|					because it keeps the x-latch to the
+|					file space management in its memo.
+V
+File system pages
+|
+V
+Kernel mutex				If a kernel operation needs a file
+|					page allocation, it must reserve the
+|					fsp x-latch before acquiring the kernel
+|					mutex.
+V
+Search system mutex
+|
+V
+Buffer pool mutex
+|
+V
+Log mutex
+|
+Any other latch
+|
+V
+Memory pool mutex */
+
+/* Latching order levels */
+
+/* User transaction locks are higher than any of the latch levels below:
+no latches are allowed when a thread goes to wait for a normal table
+or row lock! */
+#define SYNC_USER_TRX_LOCK	9999
+#define SYNC_NO_ORDER_CHECK	3000	/* this can be used to suppress
+					latching order checking */
+#define	SYNC_LEVEL_VARYING	2000	/* Level is varying. Only used with
+					buffer pool page locks, which do not
+					have a fixed level, but instead have
+					their level set after the page is
+					locked; see e.g.
+					ibuf_bitmap_get_map_page(). */
+#define SYNC_TRX_I_S_RWLOCK	1910	/* Used for
+					trx_i_s_cache_t::rw_lock */
+#define SYNC_TRX_I_S_LAST_READ	1900	/* Used for
+					trx_i_s_cache_t::last_read_mutex */
+#define SYNC_FILE_FORMAT_TAG	1200	/* Used to serialize access to the
+					file format tag */
+#define	SYNC_DICT_OPERATION	1001	/* table create, drop, etc. reserve
+					this in X-mode, implicit or backround
+					operations purge, rollback, foreign
+					key checks reserve this in S-mode */
+#define SYNC_DICT		1000
+#define SYNC_DICT_AUTOINC_MUTEX	999
+#define SYNC_DICT_HEADER	995
+#define SYNC_IBUF_HEADER	914
+#define SYNC_IBUF_PESS_INSERT_MUTEX 912
+#define SYNC_IBUF_MUTEX		910	/* ibuf mutex is really below
+					SYNC_FSP_PAGE: we assign a value this
+					high only to make the program to pass
+					the debug checks */
+/*-------------------------------*/
+#define	SYNC_INDEX_TREE		900
+#define SYNC_TREE_NODE_NEW	892
+#define SYNC_TREE_NODE_FROM_HASH 891
+#define SYNC_TREE_NODE		890
+#define	SYNC_PURGE_SYS		810
+#define	SYNC_PURGE_LATCH	800
+#define	SYNC_TRX_UNDO		700
+#define SYNC_RSEG		600
+#define SYNC_RSEG_HEADER_NEW	591
+#define SYNC_RSEG_HEADER	590
+#define SYNC_TRX_UNDO_PAGE	570
+#define SYNC_EXTERN_STORAGE	500
+#define	SYNC_FSP		400
+#define	SYNC_FSP_PAGE		395
+/*------------------------------------- Insert buffer headers */
+/*------------------------------------- ibuf_mutex */
+/*------------------------------------- Insert buffer tree */
+#define	SYNC_IBUF_BITMAP_MUTEX	351
+#define	SYNC_IBUF_BITMAP	350
+/*-------------------------------*/
+#define	SYNC_KERNEL		300
+#define SYNC_REC_LOCK		299
+#define	SYNC_TRX_LOCK_HEAP	298
+#define SYNC_TRX_SYS_HEADER	290
+#define SYNC_LOG		170
+#define SYNC_RECV		168
+#define	SYNC_WORK_QUEUE		162
+#define	SYNC_SEARCH_SYS_CONF	161	/* for assigning btr_search_enabled */
+#define	SYNC_SEARCH_SYS		160	/* NOTE that if we have a memory
+					heap that can be extended to the
+					buffer pool, its logical level is
+					SYNC_SEARCH_SYS, as memory allocation
+					can call routines there! Otherwise
+					the level is SYNC_MEM_HASH. */
+#define	SYNC_BUF_POOL		150
+#define	SYNC_BUF_BLOCK		149
+#define SYNC_DOUBLEWRITE	140
+#define	SYNC_ANY_LATCH		135
+#define SYNC_THR_LOCAL		133
+#define	SYNC_MEM_HASH		131
+#define	SYNC_MEM_POOL		130
+
+/* Codes used to designate lock operations */
+#define RW_LOCK_NOT_LOCKED	350
+#define RW_LOCK_EX		351
+#define RW_LOCK_EXCLUSIVE	351
+#define RW_LOCK_SHARED		352
+#define RW_LOCK_WAIT_EX		353
+#define SYNC_MUTEX		354
+
+/* NOTE! The structure appears here only for the compiler to know its size.
+Do not use its fields directly! The structure used in the spin lock
+implementation of a mutual exclusion semaphore. */
+
+/** InnoDB mutex */
+struct mutex_struct {
+	os_event_t	event;	/*!< Used by sync0arr.c for the wait queue */
+	volatile lock_word_t	lock_word;	/*!< lock_word is the target
+				of the atomic test-and-set instruction when
+				atomic operations are enabled. */
+
+#if !defined(HAVE_ATOMIC_BUILTINS)
+	os_fast_mutex_t
+		os_fast_mutex;	/*!< We use this OS mutex in place of lock_word
+				when atomic operations are not enabled */
+#endif
+	ulint	waiters;	/*!< This ulint is set to 1 if there are (or
+				may be) threads waiting in the global wait
+				array for this mutex to be released.
+				Otherwise, this is 0. */
+	UT_LIST_NODE_T(mutex_t)	list; /*!< All allocated mutexes are put into
+				a list.	Pointers to the next and prev. */
+#ifdef UNIV_SYNC_DEBUG
+	const char*	file_name;	/*!< File where the mutex was locked */
+	ulint	line;		/*!< Line where the mutex was locked */
+	ulint	level;		/*!< Level in the global latching order */
+#endif /* UNIV_SYNC_DEBUG */
+	const char*	cfile_name;/*!< File name where mutex created */
+	ulint		cline;	/*!< Line where created */
+#ifdef UNIV_DEBUG
+	os_thread_id_t thread_id; /*!< The thread id of the thread
+				which locked the mutex. */
+	ulint		magic_n;	/*!< MUTEX_MAGIC_N */
+/** Value of mutex_struct::magic_n */
+# define MUTEX_MAGIC_N	(ulint)979585
+#endif /* UNIV_DEBUG */
+	ulong		count_os_wait;	/*!< count of os_wait */
+#ifdef UNIV_DEBUG
+	ulong		count_using;	/*!< count of times mutex used */
+	ulong		count_spin_loop; /*!< count of spin loops */
+	ulong		count_spin_rounds;/*!< count of spin rounds */
+	ulong		count_os_yield;	/*!< count of os_wait */
+	ib_uint64_t	lspent_time;	/*!< mutex os_wait timer msec */
+	ib_uint64_t	lmax_spent_time;/*!< mutex os_wait timer msec */
+	const char*	cmutex_name;	/*!< mutex name */
+	ulint		mutex_type;	/*!< 0=usual mutex, 1=rw_lock mutex */
+#endif /* UNIV_DEBUG */
+};
+
+/** The global array of wait cells for implementation of the databases own
+mutexes and read-write locks. */
+extern sync_array_t*	sync_primary_wait_array;/* Appears here for
+						debugging purposes only! */
+
+/** Constant determining how long spin wait is continued before suspending
+the thread. A value 600 rounds on a 1995 100 MHz Pentium seems to correspond
+to 20 microseconds. */
+
+#define	SYNC_SPIN_ROUNDS	srv_n_spin_wait_rounds
+
+/** The number of mutex_exit calls. Intended for performance monitoring. */
+extern	ib_int64_t	mutex_exit_count;
+
+#ifdef UNIV_SYNC_DEBUG
+/** Latching order checks start when this is set TRUE */
+extern ibool	sync_order_checks_on;
+#endif /* UNIV_SYNC_DEBUG */
+
+/** This variable is set to TRUE when sync_init is called */
+extern ibool	sync_initialized;
+
+/** Global list of database mutexes (not OS mutexes) created. */
+typedef UT_LIST_BASE_NODE_T(mutex_t)  ut_list_base_node_t;
+/** Global list of database mutexes (not OS mutexes) created. */
+extern ut_list_base_node_t  mutex_list;
+
+/** Mutex protecting the mutex_list variable */
+extern mutex_t mutex_list_mutex;
+
+
+#ifndef UNIV_NONINL
+#include "sync0sync.ic"
+#endif
+
+#endif
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/sync0types.h
+Global types for sync
+
+Created 9/5/1995 Heikki Tuuri
+*******************************************************/
+
+#ifndef sync0types_h
+#define sync0types_h
+
+/** Rename mutex_t to avoid name space collision on some systems */
+#define mutex_t ib_mutex_t
+/** InnoDB mutex */
+typedef struct mutex_struct		mutex_t;
+
+#endif
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/sync0arr.ic
+The wait array for synchronization primitives
+
+Inline code
+
+Created 9/5/1995 Heikki Tuuri
+*******************************************************/
+
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+Copyright (c) 2008, Google Inc.
+
+Portions of this file contain modifications contributed and copyrighted by
+Google, Inc. Those modifications are gratefully acknowledged and are described
+briefly in the InnoDB documentation. The contributions by Google are
+incorporated with their permission, and subject to the conditions contained in
+the file COPYING.Google.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/sync0rw.ic
+The read-write lock (for threads)
+
+Created 9/11/1995 Heikki Tuuri
+*******************************************************/
+
+/******************************************************************//**
+Lock an rw-lock in shared mode for the current thread. If the rw-lock is
+locked in exclusive mode, or there is an exclusive lock request waiting,
+the function spins a preset time (controlled by SYNC_SPIN_ROUNDS),
+waiting for the lock before suspending the thread. */
+UNIV_INTERN
+void
+rw_lock_s_lock_spin(
+/*================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass,	/*!< in: pass value; != 0, if the lock will
+				be passed to another thread to unlock */
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line);	/*!< in: line where requested */
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Inserts the debug information for an rw-lock. */
+UNIV_INTERN
+void
+rw_lock_add_debug_info(
+/*===================*/
+	rw_lock_t*	lock,		/*!< in: rw-lock */
+	ulint		pass,		/*!< in: pass value */
+	ulint		lock_type,	/*!< in: lock type */
+	const char*	file_name,	/*!< in: file where requested */
+	ulint		line);		/*!< in: line where requested */
+/******************************************************************//**
+Removes a debug information struct for an rw-lock. */
+UNIV_INTERN
+void
+rw_lock_remove_debug_info(
+/*======================*/
+	rw_lock_t*	lock,		/*!< in: rw-lock */
+	ulint		pass,		/*!< in: pass value */
+	ulint		lock_type);	/*!< in: lock type */
+#endif /* UNIV_SYNC_DEBUG */
+
+/********************************************************************//**
+Check if there are threads waiting for the rw-lock.
+@return	1 if waiters, 0 otherwise */
+UNIV_INLINE
+ulint
+rw_lock_get_waiters(
+/*================*/
+	const rw_lock_t*	lock)	/*!< in: rw-lock */
+{
+	return(lock->waiters);
+}
+
+/********************************************************************//**
+Sets lock->waiters to 1. It is not an error if lock->waiters is already
+1. On platforms where ATOMIC builtins are used this function enforces a
+memory barrier. */
+UNIV_INLINE
+void
+rw_lock_set_waiter_flag(
+/*====================*/
+	rw_lock_t*	lock)	/*!< in/out: rw-lock */
+{
+#ifdef INNODB_RW_LOCKS_USE_ATOMICS
+	os_compare_and_swap_ulint(&lock->waiters, 0, 1);
+#else /* INNODB_RW_LOCKS_USE_ATOMICS */
+	lock->waiters = 1;
+#endif /* INNODB_RW_LOCKS_USE_ATOMICS */
+}
+
+/********************************************************************//**
+Resets lock->waiters to 0. It is not an error if lock->waiters is already
+0. On platforms where ATOMIC builtins are used this function enforces a
+memory barrier. */
+UNIV_INLINE
+void
+rw_lock_reset_waiter_flag(
+/*======================*/
+	rw_lock_t*	lock)	/*!< in/out: rw-lock */
+{
+#ifdef INNODB_RW_LOCKS_USE_ATOMICS
+	os_compare_and_swap_ulint(&lock->waiters, 1, 0);
+#else /* INNODB_RW_LOCKS_USE_ATOMICS */
+	lock->waiters = 0;
+#endif /* INNODB_RW_LOCKS_USE_ATOMICS */
+}
+
+/******************************************************************//**
+Returns the write-status of the lock - this function made more sense
+with the old rw_lock implementation.
+@return	RW_LOCK_NOT_LOCKED, RW_LOCK_EX, RW_LOCK_WAIT_EX */
+UNIV_INLINE
+ulint
+rw_lock_get_writer(
+/*===============*/
+	const rw_lock_t*	lock)	/*!< in: rw-lock */
+{
+	lint lock_word = lock->lock_word;
+	if (lock_word > 0) {
+		/* return NOT_LOCKED in s-lock state, like the writer
+		member of the old lock implementation. */
+		return(RW_LOCK_NOT_LOCKED);
+	} else if (((-lock_word) % X_LOCK_DECR) == 0) {
+		return(RW_LOCK_EX);
+	} else {
+                ut_ad(lock_word > -X_LOCK_DECR);
+		return(RW_LOCK_WAIT_EX);
+	}
+}
+
+/******************************************************************//**
+Returns the number of readers.
+@return	number of readers */
+UNIV_INLINE
+ulint
+rw_lock_get_reader_count(
+/*=====================*/
+	const rw_lock_t*	lock)	/*!< in: rw-lock */
+{
+	lint lock_word = lock->lock_word;
+	if (lock_word > 0) {
+		/* s-locked, no x-waiters */
+		return(X_LOCK_DECR - lock_word);
+	} else if (lock_word < 0 && lock_word > -X_LOCK_DECR) {
+		/* s-locked, with x-waiters */
+		return((ulint)(-lock_word));
+	}
+	return(0);
+}
+
+#ifndef INNODB_RW_LOCKS_USE_ATOMICS
+UNIV_INLINE
+mutex_t*
+rw_lock_get_mutex(
+/*==============*/
+	rw_lock_t*	lock)
+{
+	return(&(lock->mutex));
+}
+#endif
+
+/******************************************************************//**
+Returns the value of writer_count for the lock. Does not reserve the lock
+mutex, so the caller must be sure it is not changed during the call.
+@return	value of writer_count */
+UNIV_INLINE
+ulint
+rw_lock_get_x_lock_count(
+/*=====================*/
+	const rw_lock_t*	lock)	/*!< in: rw-lock */
+{
+	lint lock_copy = lock->lock_word;
+	/* If there is a reader, lock_word is not divisible by X_LOCK_DECR */
+	if (lock_copy > 0 || (-lock_copy) % X_LOCK_DECR != 0) {
+		return(0);
+	}
+	return(((-lock_copy) / X_LOCK_DECR) + 1);
+}
+
+/******************************************************************//**
+Two different implementations for decrementing the lock_word of a rw_lock:
+one for systems supporting atomic operations, one for others. This does
+does not support recusive x-locks: they should be handled by the caller and
+need not be atomic since they are performed by the current lock holder.
+Returns true if the decrement was made, false if not.
+@return	TRUE if decr occurs */
+UNIV_INLINE
+ibool
+rw_lock_lock_word_decr(
+/*===================*/
+	rw_lock_t*	lock,		/*!< in/out: rw-lock */
+	ulint		amount)		/*!< in: amount to decrement */
+{
+#ifdef INNODB_RW_LOCKS_USE_ATOMICS
+        lint local_lock_word = lock->lock_word;
+	while (local_lock_word > 0) {
+		if (os_compare_and_swap_lint(&lock->lock_word,
+					     local_lock_word,
+					     local_lock_word - amount)) {
+			return(TRUE);
+		}
+		local_lock_word = lock->lock_word;
+	}
+	return(FALSE);
+#else /* INNODB_RW_LOCKS_USE_ATOMICS */
+	ibool success = FALSE;
+	mutex_enter(&(lock->mutex));
+	if (lock->lock_word > 0) {
+		lock->lock_word -= amount;
+		success = TRUE;
+	}
+	mutex_exit(&(lock->mutex));
+	return(success);
+#endif /* INNODB_RW_LOCKS_USE_ATOMICS */
+}
+
+/******************************************************************//**
+Increments lock_word the specified amount and returns new value.
+@return	lock->lock_word after increment */
+UNIV_INLINE
+lint
+rw_lock_lock_word_incr(
+/*===================*/
+	rw_lock_t*	lock,		/*!< in/out: rw-lock */
+	ulint		amount)		/*!< in: amount of increment */
+{
+#ifdef INNODB_RW_LOCKS_USE_ATOMICS
+	return(os_atomic_increment_lint(&lock->lock_word, amount));
+#else /* INNODB_RW_LOCKS_USE_ATOMICS */
+	lint		local_lock_word;
+
+	mutex_enter(&(lock->mutex));
+
+	lock->lock_word += amount;
+	local_lock_word = lock->lock_word;
+
+	mutex_exit(&(lock->mutex));
+
+        return(local_lock_word);
+#endif /* INNODB_RW_LOCKS_USE_ATOMICS */
+}
+
+/******************************************************************//**
+This function sets the lock->writer_thread and lock->recursive fields.
+For platforms where we are using atomic builtins instead of lock->mutex
+it sets the lock->writer_thread field using atomics to ensure memory
+ordering. Note that it is assumed that the caller of this function
+effectively owns the lock i.e.: nobody else is allowed to modify
+lock->writer_thread at this point in time.
+The protocol is that lock->writer_thread MUST be updated BEFORE the
+lock->recursive flag is set. */
+UNIV_INLINE
+void
+rw_lock_set_writer_id_and_recursion_flag(
+/*=====================================*/
+	rw_lock_t*	lock,		/*!< in/out: lock to work on */
+	ibool		recursive)	/*!< in: TRUE if recursion
+					allowed */
+{
+	os_thread_id_t	curr_thread	= os_thread_get_curr_id();
+
+#ifdef INNODB_RW_LOCKS_USE_ATOMICS
+	os_thread_id_t	local_thread;
+	ibool		success;
+
+	/* Prevent Valgrind warnings about writer_thread being
+	uninitialized.  It does not matter if writer_thread is
+	uninitialized, because we are comparing writer_thread against
+	itself, and the operation should always succeed. */
+	UNIV_MEM_VALID(&lock->writer_thread, sizeof lock->writer_thread);
+
+	local_thread = lock->writer_thread;
+	success = os_compare_and_swap_thread_id(
+		&lock->writer_thread, local_thread, curr_thread);
+	ut_a(success);
+	lock->recursive = recursive;
+
+#else /* INNODB_RW_LOCKS_USE_ATOMICS */
+
+	mutex_enter(&lock->mutex);
+	lock->writer_thread = curr_thread;
+	lock->recursive = recursive;
+	mutex_exit(&lock->mutex);
+
+#endif /* INNODB_RW_LOCKS_USE_ATOMICS */
+}
+
+/******************************************************************//**
+Low-level function which tries to lock an rw-lock in s-mode. Performs no
+spinning.
+@return	TRUE if success */
+UNIV_INLINE
+ibool
+rw_lock_s_lock_low(
+/*===============*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass __attribute__((unused)),
+				/*!< in: pass value; != 0, if the lock will be
+				passed to another thread to unlock */
+	const char*	file_name, /*!< in: file name where lock requested */
+	ulint		line)	/*!< in: line where requested */
+{
+	/* TODO: study performance of UNIV_LIKELY branch prediction hints. */
+	if (!rw_lock_lock_word_decr(lock, 1)) {
+		/* Locking did not succeed */
+		return(FALSE);
+	}
+
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_add_debug_info(lock, pass, RW_LOCK_SHARED, file_name, line);
+#endif
+	/* These debugging values are not set safely: they may be incorrect
+        or even refer to a line that is invalid for the file name. */
+	lock->last_s_file_name = file_name;
+	lock->last_s_line = line;
+
+	return(TRUE);	/* locking succeeded */
+}
+
+/******************************************************************//**
+Low-level function which locks an rw-lock in s-mode when we know that it
+is possible and none else is currently accessing the rw-lock structure.
+Then we can do the locking without reserving the mutex. */
+UNIV_INLINE
+void
+rw_lock_s_lock_direct(
+/*==================*/
+	rw_lock_t*	lock,		/*!< in/out: rw-lock */
+	const char*	file_name,	/*!< in: file name where requested */
+	ulint		line)		/*!< in: line where lock requested */
+{
+	ut_ad(lock->lock_word == X_LOCK_DECR);
+
+	/* Indicate there is a new reader by decrementing lock_word */
+	lock->lock_word--;
+
+	lock->last_s_file_name = file_name;
+	lock->last_s_line = line;
+
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_add_debug_info(lock, 0, RW_LOCK_SHARED, file_name, line);
+#endif
+}
+
+/******************************************************************//**
+Low-level function which locks an rw-lock in x-mode when we know that it
+is not locked and none else is currently accessing the rw-lock structure.
+Then we can do the locking without reserving the mutex. */
+UNIV_INLINE
+void
+rw_lock_x_lock_direct(
+/*==================*/
+	rw_lock_t*	lock,		/*!< in/out: rw-lock */
+	const char*	file_name,	/*!< in: file name where requested */
+	ulint		line)		/*!< in: line where lock requested */
+{
+	ut_ad(rw_lock_validate(lock));
+	ut_ad(lock->lock_word == X_LOCK_DECR);
+
+	lock->lock_word -= X_LOCK_DECR;
+	lock->writer_thread = os_thread_get_curr_id();
+	lock->recursive = TRUE;
+
+	lock->last_x_file_name = file_name;
+	lock->last_x_line = line;
+
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_add_debug_info(lock, 0, RW_LOCK_EX, file_name, line);
+#endif
+}
+
+/******************************************************************//**
+NOTE! Use the corresponding macro, not directly this function! Lock an
+rw-lock in shared mode for the current thread. If the rw-lock is locked
+in exclusive mode, or there is an exclusive lock request waiting, the
+function spins a preset time (controlled by SYNC_SPIN_ROUNDS), waiting for
+the lock, before suspending the thread. */
+UNIV_INLINE
+void
+rw_lock_s_lock_func(
+/*================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass,	/*!< in: pass value; != 0, if the lock will
+				be passed to another thread to unlock */
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line)	/*!< in: line where requested */
+{
+	/* NOTE: As we do not know the thread ids for threads which have
+	s-locked a latch, and s-lockers will be served only after waiting
+	x-lock requests have been fulfilled, then if this thread already
+	owns an s-lock here, it may end up in a deadlock with another thread
+	which requests an x-lock here. Therefore, we will forbid recursive
+	s-locking of a latch: the following assert will warn the programmer
+	of the possibility of this kind of a deadlock. If we want to implement
+	safe recursive s-locking, we should keep in a list the thread ids of
+	the threads which have s-locked a latch. This would use some CPU
+	time. */
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(lock, RW_LOCK_SHARED)); /* see NOTE above */
+#endif /* UNIV_SYNC_DEBUG */
+
+	/* TODO: study performance of UNIV_LIKELY branch prediction hints. */
+	if (rw_lock_s_lock_low(lock, pass, file_name, line)) {
+
+		return; /* Success */
+	} else {
+		/* Did not succeed, try spin wait */
+
+		rw_lock_s_lock_spin(lock, pass, file_name, line);
+
+		return;
+	}
+}
+
+/******************************************************************//**
+NOTE! Use the corresponding macro, not directly this function! Lock an
+rw-lock in exclusive mode for the current thread if the lock can be
+obtained immediately.
+@return	TRUE if success */
+UNIV_INLINE
+ibool
+rw_lock_x_lock_func_nowait(
+/*=======================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line)	/*!< in: line where requested */
+{
+	os_thread_id_t	curr_thread	= os_thread_get_curr_id();
+
+	ibool success;
+
+#ifdef INNODB_RW_LOCKS_USE_ATOMICS
+	success = os_compare_and_swap_lint(&lock->lock_word, X_LOCK_DECR, 0);
+#else
+
+	success = FALSE;
+	mutex_enter(&(lock->mutex));
+	if (lock->lock_word == X_LOCK_DECR) {
+		lock->lock_word = 0;
+		success = TRUE;
+	}
+	mutex_exit(&(lock->mutex));
+
+#endif
+	if (success) {
+		rw_lock_set_writer_id_and_recursion_flag(lock, TRUE);
+
+	} else if (lock->recursive
+		   && os_thread_eq(lock->writer_thread, curr_thread)) {
+		/* Relock: this lock_word modification is safe since no other
+		threads can modify (lock, unlock, or reserve) lock_word while
+		there is an exclusive writer and this is the writer thread. */
+		lock->lock_word -= X_LOCK_DECR;
+
+		ut_ad(((-lock->lock_word) % X_LOCK_DECR) == 0);
+
+	} else {
+		/* Failure */
+		return(FALSE);
+	}
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_add_debug_info(lock, 0, RW_LOCK_EX, file_name, line);
+#endif
+
+	lock->last_x_file_name = file_name;
+	lock->last_x_line = line;
+
+	ut_ad(rw_lock_validate(lock));
+
+	return(TRUE);
+}
+
+/******************************************************************//**
+Releases a shared mode lock. */
+UNIV_INLINE
+void
+rw_lock_s_unlock_func(
+/*==================*/
+#ifdef UNIV_SYNC_DEBUG
+	ulint		pass,	/*!< in: pass value; != 0, if the lock may have
+				been passed to another thread to unlock */
+#endif
+	rw_lock_t*	lock)	/*!< in/out: rw-lock */
+{
+	ut_ad((lock->lock_word % X_LOCK_DECR) != 0);
+
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_remove_debug_info(lock, pass, RW_LOCK_SHARED);
+#endif
+
+	/* Increment lock_word to indicate 1 less reader */
+	if (rw_lock_lock_word_incr(lock, 1) == 0) {
+
+		/* wait_ex waiter exists. It may not be asleep, but we signal
+                anyway. We do not wake other waiters, because they can't
+                exist without wait_ex waiter and wait_ex waiter goes first.*/
+		os_event_set(lock->wait_ex_event);
+		sync_array_object_signalled(sync_primary_wait_array);
+
+	}
+
+	ut_ad(rw_lock_validate(lock));
+
+#ifdef UNIV_SYNC_PERF_STAT
+	rw_s_exit_count++;
+#endif
+}
+
+/******************************************************************//**
+Releases a shared mode lock when we know there are no waiters and none
+else will access the lock during the time this function is executed. */
+UNIV_INLINE
+void
+rw_lock_s_unlock_direct(
+/*====================*/
+	rw_lock_t*	lock)	/*!< in/out: rw-lock */
+{
+	ut_ad(lock->lock_word < X_LOCK_DECR);
+
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_remove_debug_info(lock, 0, RW_LOCK_SHARED);
+#endif
+
+	/* Decrease reader count by incrementing lock_word */
+	lock->lock_word++;
+
+	ut_ad(!lock->waiters);
+	ut_ad(rw_lock_validate(lock));
+#ifdef UNIV_SYNC_PERF_STAT
+	rw_s_exit_count++;
+#endif
+}
+
+/******************************************************************//**
+Releases an exclusive mode lock. */
+UNIV_INLINE
+void
+rw_lock_x_unlock_func(
+/*==================*/
+#ifdef UNIV_SYNC_DEBUG
+	ulint		pass,	/*!< in: pass value; != 0, if the lock may have
+				been passed to another thread to unlock */
+#endif
+	rw_lock_t*	lock)	/*!< in/out: rw-lock */
+{
+	ut_ad((lock->lock_word % X_LOCK_DECR) == 0);
+
+	/* lock->recursive flag also indicates if lock->writer_thread is
+	valid or stale. If we are the last of the recursive callers
+	then we must unset lock->recursive flag to indicate that the
+	lock->writer_thread is now stale.
+	Note that since we still hold the x-lock we can safely read the
+	lock_word. */
+	if (lock->lock_word == 0) {
+		/* Last caller in a possible recursive chain. */
+		lock->recursive = FALSE;
+		UNIV_MEM_INVALID(&lock->writer_thread,
+				 sizeof lock->writer_thread);
+	}
+
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_remove_debug_info(lock, pass, RW_LOCK_EX);
+#endif
+
+	if (rw_lock_lock_word_incr(lock, X_LOCK_DECR) == X_LOCK_DECR) {
+		/* Lock is now free. May have to signal read/write waiters.
+                We do not need to signal wait_ex waiters, since they cannot
+                exist when there is a writer. */
+		if (lock->waiters) {
+			rw_lock_reset_waiter_flag(lock);
+			os_event_set(lock->event);
+			sync_array_object_signalled(sync_primary_wait_array);
+		}
+	}
+
+	ut_ad(rw_lock_validate(lock));
+
+#ifdef UNIV_SYNC_PERF_STAT
+	rw_x_exit_count++;
+#endif
+}
+
+/******************************************************************//**
+Releases an exclusive mode lock when we know there are no waiters, and
+none else will access the lock during the time this function is executed. */
+UNIV_INLINE
+void
+rw_lock_x_unlock_direct(
+/*====================*/
+	rw_lock_t*	lock)	/*!< in/out: rw-lock */
+{
+	/* Reset the exclusive lock if this thread no longer has an x-mode
+	lock */
+
+	ut_ad((lock->lock_word % X_LOCK_DECR) == 0);
+
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_remove_debug_info(lock, 0, RW_LOCK_EX);
+#endif
+
+	if (lock->lock_word == 0) {
+		lock->recursive = FALSE;
+		UNIV_MEM_INVALID(&lock->writer_thread,
+				 sizeof lock->writer_thread);
+	}
+
+	lock->lock_word += X_LOCK_DECR;
+
+	ut_ad(!lock->waiters);
+	ut_ad(rw_lock_validate(lock));
+
+#ifdef UNIV_SYNC_PERF_STAT
+	rw_x_exit_count++;
+#endif
+}
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+Copyright (c) 2008, Google Inc.
+
+Portions of this file contain modifications contributed and copyrighted by
+Google, Inc. Those modifications are gratefully acknowledged and are described
+briefly in the InnoDB documentation. The contributions by Google are
+incorporated with their permission, and subject to the conditions contained in
+the file COPYING.Google.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/sync0sync.ic
+Mutex, the basic synchronization primitive
+
+Created 9/5/1995 Heikki Tuuri
+*******************************************************/
+
+/******************************************************************//**
+Sets the waiters field in a mutex. */
+UNIV_INTERN
+void
+mutex_set_waiters(
+/*==============*/
+	mutex_t*	mutex,	/*!< in: mutex */
+	ulint		n);	/*!< in: value to set */
+/******************************************************************//**
+Reserves a mutex for the current thread. If the mutex is reserved, the
+function spins a preset time (controlled by SYNC_SPIN_ROUNDS) waiting
+for the mutex before suspending the thread. */
+UNIV_INTERN
+void
+mutex_spin_wait(
+/*============*/
+	mutex_t*	mutex,		/*!< in: pointer to mutex */
+	const char*	file_name,	/*!< in: file name where mutex
+					requested */
+	ulint		line);		/*!< in: line where requested */
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Sets the debug information for a reserved mutex. */
+UNIV_INTERN
+void
+mutex_set_debug_info(
+/*=================*/
+	mutex_t*	mutex,		/*!< in: mutex */
+	const char*	file_name,	/*!< in: file where requested */
+	ulint		line);		/*!< in: line where requested */
+#endif /* UNIV_SYNC_DEBUG */
+/******************************************************************//**
+Releases the threads waiting in the primary wait array for this mutex. */
+UNIV_INTERN
+void
+mutex_signal_object(
+/*================*/
+	mutex_t*	mutex);	/*!< in: mutex */
+
+/******************************************************************//**
+Performs an atomic test-and-set instruction to the lock_word field of a
+mutex.
+@return	the previous value of lock_word: 0 or 1 */
+UNIV_INLINE
+byte
+mutex_test_and_set(
+/*===============*/
+	mutex_t*	mutex)	/*!< in: mutex */
+{
+#if defined(HAVE_ATOMIC_BUILTINS)
+	return(os_atomic_test_and_set_byte(&mutex->lock_word, 1));
+#else
+	ibool	ret;
+
+	ret = os_fast_mutex_trylock(&(mutex->os_fast_mutex));
+
+	if (ret == 0) {
+		/* We check that os_fast_mutex_trylock does not leak
+		and allow race conditions */
+		ut_a(mutex->lock_word == 0);
+
+		mutex->lock_word = 1;
+	}
+
+	return((byte)ret);
+#endif
+}
+
+/******************************************************************//**
+Performs a reset instruction to the lock_word field of a mutex. This
+instruction also serializes memory operations to the program order. */
+UNIV_INLINE
+void
+mutex_reset_lock_word(
+/*==================*/
+	mutex_t*	mutex)	/*!< in: mutex */
+{
+#if defined(HAVE_ATOMIC_BUILTINS)
+	/* In theory __sync_lock_release should be used to release the lock.
+	Unfortunately, it does not work properly alone. The workaround is
+	that more conservative __sync_lock_test_and_set is used instead. */
+	os_atomic_test_and_set_byte(&mutex->lock_word, 0);
+#else
+	mutex->lock_word = 0;
+
+	os_fast_mutex_unlock(&(mutex->os_fast_mutex));
+#endif
+}
+
+/******************************************************************//**
+Gets the value of the lock word. */
+UNIV_INLINE
+lock_word_t
+mutex_get_lock_word(
+/*================*/
+	const mutex_t*	mutex)	/*!< in: mutex */
+{
+	ut_ad(mutex);
+
+	return(mutex->lock_word);
+}
+
+/******************************************************************//**
+Gets the waiters field in a mutex.
+@return	value to set */
+UNIV_INLINE
+ulint
+mutex_get_waiters(
+/*==============*/
+	const mutex_t*	mutex)	/*!< in: mutex */
+{
+	const volatile ulint*	ptr;	/*!< declared volatile to ensure that
+					the value is read from memory */
+	ut_ad(mutex);
+
+	ptr = &(mutex->waiters);
+
+	return(*ptr);		/* Here we assume that the read of a single
+				word from memory is atomic */
+}
+
+/******************************************************************//**
+Unlocks a mutex owned by the current thread. */
+UNIV_INLINE
+void
+mutex_exit(
+/*=======*/
+	mutex_t*	mutex)	/*!< in: pointer to mutex */
+{
+	ut_ad(mutex_own(mutex));
+
+	ut_d(mutex->thread_id = (os_thread_id_t) ULINT_UNDEFINED);
+
+#ifdef UNIV_SYNC_DEBUG
+	sync_thread_reset_level(mutex);
+#endif
+	mutex_reset_lock_word(mutex);
+
+	/* A problem: we assume that mutex_reset_lock word
+	is a memory barrier, that is when we read the waiters
+	field next, the read must be serialized in memory
+	after the reset. A speculative processor might
+	perform the read first, which could leave a waiting
+	thread hanging indefinitely.
+
+	Our current solution call every second
+	sync_arr_wake_threads_if_sema_free()
+	to wake up possible hanging threads if
+	they are missed in mutex_signal_object. */
+
+	if (mutex_get_waiters(mutex) != 0) {
+
+		mutex_signal_object(mutex);
+	}
+
+#ifdef UNIV_SYNC_PERF_STAT
+	mutex_exit_count++;
+#endif
+}
+
+/******************************************************************//**
+Locks a mutex for the current thread. If the mutex is reserved, the function
+spins a preset time (controlled by SYNC_SPIN_ROUNDS), waiting for the mutex
+before suspending the thread. */
+UNIV_INLINE
+void
+mutex_enter_func(
+/*=============*/
+	mutex_t*	mutex,		/*!< in: pointer to mutex */
+	const char*	file_name,	/*!< in: file name where locked */
+	ulint		line)		/*!< in: line where locked */
+{
+	ut_ad(mutex_validate(mutex));
+	ut_ad(!mutex_own(mutex));
+
+	/* Note that we do not peek at the value of lock_word before trying
+	the atomic test_and_set; we could peek, and possibly save time. */
+
+	ut_d(mutex->count_using++);
+
+	if (!mutex_test_and_set(mutex)) {
+		ut_d(mutex->thread_id = os_thread_get_curr_id());
+#ifdef UNIV_SYNC_DEBUG
+		mutex_set_debug_info(mutex, file_name, line);
+#endif
+		return;	/* Succeeded! */
+	}
+
+	mutex_spin_wait(mutex, file_name, line);
+}
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/thr0loc.h
+The thread local storage
+
+Created 10/5/1995 Heikki Tuuri
+*******************************************************/
+
+/* This module implements storage private to each thread,
+a capability useful in some situations like storing the
+OS handle to the current thread, or its priority. */
+
+#ifndef thr0loc_h
+#define thr0loc_h
+
+#include "univ.i"
+#include "os0thread.h"
+
+/****************************************************************//**
+Initializes the thread local storage module. */
+UNIV_INTERN
+void
+thr_local_init(void);
+/*================*/
+/******************************************************************//**
+Close the thread local storage module. */
+UNIV_INTERN
+void
+thr_local_close(void);
+/*=================*/
+/*******************************************************************//**
+Creates a local storage struct for the calling new thread. */
+UNIV_INTERN
+void
+thr_local_create(void);
+/*==================*/
+/*******************************************************************//**
+Frees the local storage struct for the specified thread. */
+UNIV_INTERN
+void
+thr_local_free(
+/*===========*/
+	os_thread_id_t	id);	/*!< in: thread id */
+/*******************************************************************//**
+Gets the slot number in the thread table of a thread.
+@return	slot number */
+UNIV_INTERN
+ulint
+thr_local_get_slot_no(
+/*==================*/
+	os_thread_id_t	id);	/*!< in: thread id of the thread */
+/*******************************************************************//**
+Sets in the local storage the slot number in the thread table of a thread. */
+UNIV_INTERN
+void
+thr_local_set_slot_no(
+/*==================*/
+	os_thread_id_t	id,	/*!< in: thread id of the thread */
+	ulint		slot_no);/*!< in: slot number */
+/*******************************************************************//**
+Returns pointer to the 'in_ibuf' field within the current thread local
+storage.
+@return	pointer to the in_ibuf field */
+UNIV_INTERN
+ibool*
+thr_local_get_in_ibuf_field(void);
+/*=============================*/
+
+#ifndef UNIV_NONINL
+#include "thr0loc.ic"
+#endif
+
+#endif
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/thr0loc.ic
+Thread local storage
+
+Created 10/4/1995 Heikki Tuuri
+*******************************************************/
+
+
+=== IMPLEMENTATION ===
+
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+Copyright (c) 2008, Google Inc.
+
+Portions of this file contain modifications contributed and copyrighted by
+Google, Inc. Those modifications are gratefully acknowledged and are described
+briefly in the InnoDB documentation. The contributions by Google are
+incorporated with their permission, and subject to the conditions contained in
+the file COPYING.Google.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file sync/sync0arr.c
+The wait array used in synchronization primitives
+
+Created 9/5/1995 Heikki Tuuri
+*******************************************************/
+
+#include "sync0arr.h"
+#ifdef UNIV_NONINL
+#include "sync0arr.ic"
+#endif
+
+#include "sync0sync.h"
+#include "sync0rw.h"
+#include "os0sync.h"
+#include "os0file.h"
+#include "srv0srv.h"
+
+/*
+			WAIT ARRAY
+			==========
+
+The wait array consists of cells each of which has an
+an operating system event object created for it. The threads
+waiting for a mutex, for example, can reserve a cell
+in the array and suspend themselves to wait for the event
+to become signaled. When using the wait array, remember to make
+sure that some thread holding the synchronization object
+will eventually know that there is a waiter in the array and
+signal the object, to prevent infinite wait.
+Why we chose to implement a wait array? First, to make
+mutexes fast, we had to code our own implementation of them,
+which only in usually uncommon cases resorts to using
+slow operating system primitives. Then we had the choice of
+assigning a unique OS event for each mutex, which would
+be simpler, or using a global wait array. In some operating systems,
+the global wait array solution is more efficient and flexible,
+because we can do with a very small number of OS events,
+say 200. In NT 3.51, allocating events seems to be a quadratic
+algorithm, because 10 000 events are created fast, but
+100 000 events takes a couple of minutes to create.
+
+As of 5.0.30 the above mentioned design is changed. Since now
+OS can handle millions of wait events efficiently, we no longer
+have this concept of each cell of wait array having one event.
+Instead, now the event that a thread wants to wait on is embedded
+in the wait object (mutex or rw_lock). We still keep the global
+wait array for the sake of diagnostics and also to avoid infinite
+wait The error_monitor thread scans the global wait array to signal
+any waiting threads who have missed the signal. */
+
+/** A cell where an individual thread may wait suspended
+until a resource is released. The suspending is implemented
+using an operating system event semaphore. */
+struct sync_cell_struct {
+	void*		wait_object;	/*!< pointer to the object the
+					thread is waiting for; if NULL
+					the cell is free for use */
+	mutex_t*	old_wait_mutex;	/*!< the latest wait mutex in cell */
+	rw_lock_t*	old_wait_rw_lock;
+					/*!< the latest wait rw-lock
+					in cell */
+	ulint		request_type;	/*!< lock type requested on the
+					object */
+	const char*	file;		/*!< in debug version file where
+					requested */
+	ulint		line;		/*!< in debug version line where
+					requested */
+	os_thread_id_t	thread;		/*!< thread id of this waiting
+					thread */
+	ibool		waiting;	/*!< TRUE if the thread has already
+					called sync_array_event_wait
+					on this cell */
+	ib_int64_t	signal_count;	/*!< We capture the signal_count
+					of the wait_object when we
+					reset the event. This value is
+					then passed on to os_event_wait
+					and we wait only if the event
+					has not been signalled in the
+					period between the reset and
+					wait call. */
+	time_t		reservation_time;/*!< time when the thread reserved
+					the wait cell */
+};
+
+/* NOTE: It is allowed for a thread to wait
+for an event allocated for the array without owning the
+protecting mutex (depending on the case: OS or database mutex), but
+all changes (set or reset) to the state of the event must be made
+while owning the mutex. */
+
+/** Synchronization array */
+struct sync_array_struct {
+	ulint		n_reserved;	/*!< number of currently reserved
+					cells in the wait array */
+	ulint		n_cells;	/*!< number of cells in the
+					wait array */
+	sync_cell_t*	array;		/*!< pointer to wait array */
+	ulint		protection;	/*!< this flag tells which
+					mutex protects the data */
+	mutex_t		mutex;		/*!< possible database mutex
+					protecting this data structure */
+	os_mutex_t	os_mutex;	/*!< Possible operating system mutex
+					protecting the data structure.
+					As this data structure is used in
+					constructing the database mutex,
+					to prevent infinite recursion
+					in implementation, we fall back to
+					an OS mutex. */
+	ulint		sg_count;	/*!< count of how many times an
+					object has been signalled */
+	ulint		res_count;	/*!< count of cell reservations
+					since creation of the array */
+};
+
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+This function is called only in the debug version. Detects a deadlock
+of one or more threads because of waits of semaphores.
+@return	TRUE if deadlock detected */
+UNIV_STATIC
+ibool
+sync_array_detect_deadlock(
+/*=======================*/
+	sync_array_t*	arr,	/*!< in: wait array; NOTE! the caller must
+				own the mutex to array */
+	sync_cell_t*	start,	/*!< in: cell where recursive search started */
+	sync_cell_t*	cell,	/*!< in: cell to search */
+	ulint		depth);	/*!< in: recursion depth */
+#endif /* UNIV_SYNC_DEBUG */
+
+/*****************************************************************//**
+Gets the nth cell in array.
+@return	cell */
+UNIV_STATIC
+sync_cell_t*
+sync_array_get_nth_cell(
+/*====================*/
+	sync_array_t*	arr,	/*!< in: sync array */
+	ulint		n)	/*!< in: index */
+{
+	ut_a(arr);
+	ut_a(n < arr->n_cells);
+
+	return(arr->array + n);
+}
+
+/******************************************************************//**
+Reserves the mutex semaphore protecting a sync array. */
+UNIV_STATIC
+void
+sync_array_enter(
+/*=============*/
+	sync_array_t*	arr)	/*!< in: sync wait array */
+{
+	ulint	protection;
+
+	protection = arr->protection;
+
+	if (protection == SYNC_ARRAY_OS_MUTEX) {
+		os_mutex_enter(arr->os_mutex);
+	} else if (protection == SYNC_ARRAY_MUTEX) {
+		mutex_enter(&(arr->mutex));
+	} else {
+		ut_error;
+	}
+}
+
+/******************************************************************//**
+Releases the mutex semaphore protecting a sync array. */
+UNIV_STATIC
+void
+sync_array_exit(
+/*============*/
+	sync_array_t*	arr)	/*!< in: sync wait array */
+{
+	ulint	protection;
+
+	protection = arr->protection;
+
+	if (protection == SYNC_ARRAY_OS_MUTEX) {
+		os_mutex_exit(arr->os_mutex);
+	} else if (protection == SYNC_ARRAY_MUTEX) {
+		mutex_exit(&(arr->mutex));
+	} else {
+		ut_error;
+	}
+}
+
+/*******************************************************************//**
+Creates a synchronization wait array. It is protected by a mutex
+which is automatically reserved when the functions operating on it
+are called.
+@return	own: created wait array */
+UNIV_INTERN
+sync_array_t*
+sync_array_create(
+/*==============*/
+	ulint	n_cells,	/*!< in: number of cells in the array
+				to create */
+	ulint	protection)	/*!< in: either SYNC_ARRAY_OS_MUTEX or
+				SYNC_ARRAY_MUTEX: determines the type
+				of mutex protecting the data structure */
+{
+	ulint		sz;
+	sync_array_t*	arr;
+
+	ut_a(n_cells > 0);
+
+	/* Allocate memory for the data structures */
+	arr = ut_malloc(sizeof(sync_array_t));
+	memset(arr, 0x0, sizeof(*arr));
+
+	sz = sizeof(sync_cell_t) * n_cells;
+	arr->array = ut_malloc(sz);
+	memset(arr->array, 0x0, sz);
+
+	arr->n_cells = n_cells;
+	arr->protection = protection;
+
+	/* Then create the mutex to protect the wait array complex */
+	if (protection == SYNC_ARRAY_OS_MUTEX) {
+		arr->os_mutex = os_mutex_create(NULL);
+	} else if (protection == SYNC_ARRAY_MUTEX) {
+		mutex_create(&arr->mutex, SYNC_NO_ORDER_CHECK);
+	} else {
+		ut_error;
+	}
+
+	return(arr);
+}
+
+/******************************************************************//**
+Frees the resources in a wait array. */
+UNIV_INTERN
+void
+sync_array_free(
+/*============*/
+	sync_array_t*	arr)	/*!< in, own: sync wait array */
+{
+	ulint		protection;
+
+	ut_a(arr->n_reserved == 0);
+
+	sync_array_validate(arr);
+
+	protection = arr->protection;
+
+	/* Release the mutex protecting the wait array complex */
+
+	if (protection == SYNC_ARRAY_OS_MUTEX) {
+		os_mutex_free(arr->os_mutex);
+	} else if (protection == SYNC_ARRAY_MUTEX) {
+		mutex_free(&(arr->mutex));
+	} else {
+		ut_error;
+	}
+
+	ut_free(arr->array);
+	ut_free(arr);
+}
+
+/********************************************************************//**
+Validates the integrity of the wait array. Checks
+that the number of reserved cells equals the count variable. */
+UNIV_INTERN
+void
+sync_array_validate(
+/*================*/
+	sync_array_t*	arr)	/*!< in: sync wait array */
+{
+	ulint		i;
+	sync_cell_t*	cell;
+	ulint		count		= 0;
+
+	sync_array_enter(arr);
+
+	for (i = 0; i < arr->n_cells; i++) {
+		cell = sync_array_get_nth_cell(arr, i);
+		if (cell->wait_object != NULL) {
+			count++;
+		}
+	}
+
+	ut_a(count == arr->n_reserved);
+
+	sync_array_exit(arr);
+}
+
+/*******************************************************************//**
+Returns the event that the thread owning the cell waits for. */
+UNIV_STATIC
+os_event_t
+sync_cell_get_event(
+/*================*/
+	sync_cell_t*	cell) /*!< in: non-empty sync array cell */
+{
+	ulint type = cell->request_type;
+
+	if (type == SYNC_MUTEX) {
+		return(((mutex_t *) cell->wait_object)->event);
+	} else if (type == RW_LOCK_WAIT_EX) {
+		return(((rw_lock_t *) cell->wait_object)->wait_ex_event);
+	} else { /* RW_LOCK_SHARED and RW_LOCK_EX wait on the same event */
+		return(((rw_lock_t *) cell->wait_object)->event);
+	}
+}
+
+/******************************************************************//**
+Reserves a wait array cell for waiting for an object.
+The event of the cell is reset to nonsignalled state. */
+UNIV_INTERN
+void
+sync_array_reserve_cell(
+/*====================*/
+	sync_array_t*	arr,	/*!< in: wait array */
+	void*		object, /*!< in: pointer to the object to wait for */
+	ulint		type,	/*!< in: lock request type */
+	const char*	file,	/*!< in: file where requested */
+	ulint		line,	/*!< in: line where requested */
+	ulint*		index)	/*!< out: index of the reserved cell */
+{
+	sync_cell_t*	cell;
+	os_event_t      event;
+	ulint		i;
+
+	ut_a(object);
+	ut_a(index);
+
+	sync_array_enter(arr);
+
+	arr->res_count++;
+
+	/* Reserve a new cell. */
+	for (i = 0; i < arr->n_cells; i++) {
+		cell = sync_array_get_nth_cell(arr, i);
+
+		if (cell->wait_object == NULL) {
+
+			cell->waiting = FALSE;
+			cell->wait_object = object;
+
+			if (type == SYNC_MUTEX) {
+				cell->old_wait_mutex = object;
+			} else {
+				cell->old_wait_rw_lock = object;
+			}
+
+			cell->request_type = type;
+
+			cell->file = file;
+			cell->line = line;
+
+			arr->n_reserved++;
+
+			*index = i;
+
+			sync_array_exit(arr);
+
+			/* Make sure the event is reset and also store
+			the value of signal_count at which the event
+			was reset. */
+                        event = sync_cell_get_event(cell);
+			cell->signal_count = os_event_reset(event);
+
+			cell->reservation_time = time(NULL);
+
+			cell->thread = os_thread_get_curr_id();
+
+			return;
+		}
+	}
+
+	ut_error; /* No free cell found */
+
+	return;
+}
+
+/******************************************************************//**
+This function should be called when a thread starts to wait on
+a wait array cell. In the debug version this function checks
+if the wait for a semaphore will result in a deadlock, in which
+case prints info and asserts. */
+UNIV_INTERN
+void
+sync_array_wait_event(
+/*==================*/
+	sync_array_t*	arr,	/*!< in: wait array */
+	ulint		index)	/*!< in: index of the reserved cell */
+{
+	sync_cell_t*	cell;
+	os_event_t	event;
+
+	ut_a(arr);
+
+	sync_array_enter(arr);
+
+	cell = sync_array_get_nth_cell(arr, index);
+
+	ut_a(cell->wait_object);
+	ut_a(!cell->waiting);
+	ut_ad(os_thread_get_curr_id() == cell->thread);
+
+	event = sync_cell_get_event(cell);
+		cell->waiting = TRUE;
+
+#ifdef UNIV_SYNC_DEBUG
+
+	/* We use simple enter to the mutex below, because if
+	we cannot acquire it at once, mutex_enter would call
+	recursively sync_array routines, leading to trouble.
+	rw_lock_debug_mutex freezes the debug lists. */
+
+	rw_lock_debug_mutex_enter();
+
+	if (TRUE == sync_array_detect_deadlock(arr, cell, cell, 0)) {
+
+		ib_logger(ib_stream, 
+			"########################################\n");
+		ut_error;
+	}
+
+	rw_lock_debug_mutex_exit();
+#endif
+	sync_array_exit(arr);
+
+	os_event_wait_low(event, cell->signal_count);
+
+	sync_array_free_cell(arr, index);
+}
+
+/******************************************************************//**
+Reports info of a wait array cell. */
+UNIV_STATIC
+void
+sync_array_cell_print(
+/*==================*/
+	ib_stream_t	ib_stream,	/*!< in: stream where to print */
+	sync_cell_t*	cell)		/*!< in: sync cell */
+{
+	mutex_t*	mutex;
+	rw_lock_t*	rwlock;
+	ulint		type;
+	ulint		writer;
+
+	type = cell->request_type;
+
+	ib_logger(ib_stream,
+		"--Thread %lu has waited at %s line %lu"
+		" for %.2f seconds the semaphore:\n",
+		(ulong) os_thread_pf(cell->thread), cell->file,
+		(ulong) cell->line,
+		difftime(time(NULL), cell->reservation_time));
+
+	if (type == SYNC_MUTEX) {
+		/* We use old_wait_mutex in case the cell has already
+		been freed meanwhile */
+		mutex = cell->old_wait_mutex;
+
+		ib_logger(ib_stream,
+			"Mutex at %p created file %s line %lu, lock var %lu\n"
+#ifdef UNIV_SYNC_DEBUG
+			"Last time reserved in file %s line %lu, "
+#endif /* UNIV_SYNC_DEBUG */
+			"waiters flag %lu\n",
+			(void*) mutex, mutex->cfile_name, (ulong) mutex->cline,
+			(ulong) mutex->lock_word,
+#ifdef UNIV_SYNC_DEBUG
+			mutex->file_name, (ulong) mutex->line,
+#endif /* UNIV_SYNC_DEBUG */
+			(ulong) mutex->waiters);
+
+	} else if (type == RW_LOCK_EX
+		   || type == RW_LOCK_WAIT_EX
+		   || type == RW_LOCK_SHARED) {
+
+		ib_logger(ib_stream, "%s",
+			type == RW_LOCK_EX ? "X-lock on" : "S-lock on");
+
+		rwlock = cell->old_wait_rw_lock;
+
+		ib_logger(ib_stream,
+			" RW-latch at %p created in file %s line %lu\n",
+			(void*) rwlock, rwlock->cfile_name,
+			(ulong) rwlock->cline);
+		writer = rw_lock_get_writer(rwlock);
+		if (writer != RW_LOCK_NOT_LOCKED) {
+			ib_logger(ib_stream,
+				"a writer (thread id %lu) has"
+				" reserved it in mode %s",
+				(ulong) os_thread_pf(rwlock->writer_thread),
+				writer == RW_LOCK_EX
+				? " exclusive\n"
+				: " wait exclusive\n");
+		}
+
+		ib_logger(ib_stream,
+			"number of readers %lu, waiters flag %lu, "
+                        "lock_word: %lx\n"
+			"Last time read locked in file %s line %lu\n"
+			"Last time write locked in file %s line %lu\n",
+			(ulong) rw_lock_get_reader_count(rwlock),
+			(ulong) rwlock->waiters,
+			rwlock->lock_word,
+			rwlock->last_s_file_name,
+			(ulong) rwlock->last_s_line,
+			rwlock->last_x_file_name,
+			(ulong) rwlock->last_x_line);
+	} else {
+		ut_error;
+	}
+
+	if (!cell->waiting) {
+		ib_logger(ib_stream, "wait has ended\n");
+	}
+}
+
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Looks for a cell with the given thread id.
+@return	pointer to cell or NULL if not found */
+UNIV_STATIC
+sync_cell_t*
+sync_array_find_thread(
+/*===================*/
+	sync_array_t*	arr,	/*!< in: wait array */
+	os_thread_id_t	thread)	/*!< in: thread id */
+{
+	ulint		i;
+	sync_cell_t*	cell;
+
+	for (i = 0; i < arr->n_cells; i++) {
+
+		cell = sync_array_get_nth_cell(arr, i);
+
+		if (cell->wait_object != NULL
+		    && os_thread_eq(cell->thread, thread)) {
+
+			return(cell);	/* Found */
+		}
+	}
+
+	return(NULL);	/* Not found */
+}
+
+/******************************************************************//**
+Recursion step for deadlock detection.
+@return	TRUE if deadlock detected */
+UNIV_STATIC
+ibool
+sync_array_deadlock_step(
+/*=====================*/
+	sync_array_t*	arr,	/*!< in: wait array; NOTE! the caller must
+				own the mutex to array */
+	sync_cell_t*	start,	/*!< in: cell where recursive search
+				started */
+	os_thread_id_t	thread,	/*!< in: thread to look at */
+	ulint		pass,	/*!< in: pass value */
+	ulint		depth)	/*!< in: recursion depth */
+{
+	sync_cell_t*	new;
+	ibool		ret;
+
+	depth++;
+
+	if (pass != 0) {
+		/* If pass != 0, then we do not know which threads are
+		responsible of releasing the lock, and no deadlock can
+		be detected. */
+
+		return(FALSE);
+	}
+
+	new = sync_array_find_thread(arr, thread);
+
+	if (new == start) {
+		/* Stop running of other threads */
+
+		ut_dbg_stop_threads = TRUE;
+
+		/* Deadlock */
+		ib_logger(ib_stream,
+			"########################################\n"
+			"DEADLOCK of threads detected!\n");
+
+		return(TRUE);
+
+	} else if (new) {
+		ret = sync_array_detect_deadlock(arr, start, new, depth);
+
+		if (ret) {
+			return(TRUE);
+		}
+	}
+	return(FALSE);
+}
+
+/******************************************************************//**
+This function is called only in the debug version. Detects a deadlock
+of one or more threads because of waits of semaphores.
+@return	TRUE if deadlock detected */
+UNIV_STATIC
+ibool
+sync_array_detect_deadlock(
+/*=======================*/
+	sync_array_t*	arr,	/*!< in: wait array; NOTE! the caller must
+				own the mutex to array */
+	sync_cell_t*	start,	/*!< in: cell where recursive search started */
+	sync_cell_t*	cell,	/*!< in: cell to search */
+	ulint		depth)	/*!< in: recursion depth */
+{
+	mutex_t*	mutex;
+	rw_lock_t*	lock;
+	os_thread_id_t	thread;
+	ibool		ret;
+	rw_lock_debug_t*debug;
+
+	ut_a(arr);
+	ut_a(start);
+	ut_a(cell);
+	ut_ad(cell->wait_object);
+	ut_ad(os_thread_get_curr_id() == start->thread);
+	ut_ad(depth < 100);
+
+	depth++;
+
+	if (!cell->waiting) {
+
+		return(FALSE); /* No deadlock here */
+	}
+
+	if (cell->request_type == SYNC_MUTEX) {
+
+		mutex = cell->wait_object;
+
+		if (mutex_get_lock_word(mutex) != 0) {
+
+			thread = mutex->thread_id;
+
+			/* Note that mutex->thread_id above may be
+			also OS_THREAD_ID_UNDEFINED, because the
+			thread which held the mutex maybe has not
+			yet updated the value, or it has already
+			released the mutex: in this case no deadlock
+			can occur, as the wait array cannot contain
+			a thread with ID_UNDEFINED value. */
+
+			ret = sync_array_deadlock_step(arr, start, thread, 0,
+						       depth);
+			if (ret) {
+				ib_logger(ib_stream,
+					"Mutex %p owned by thread %lu file %s "
+					"line %lu\n",
+					mutex,
+				       	(ulong) os_thread_pf(mutex->thread_id),
+					mutex->file_name, (ulong) mutex->line);
+				sync_array_cell_print(ib_stream, cell);
+
+				return(TRUE);
+			}
+		}
+
+		return(FALSE); /* No deadlock */
+
+	} else if (cell->request_type == RW_LOCK_EX
+		   || cell->request_type == RW_LOCK_WAIT_EX) {
+
+		lock = cell->wait_object;
+
+		debug = UT_LIST_GET_FIRST(lock->debug_list);
+
+		while (debug != NULL) {
+
+			thread = debug->thread_id;
+
+			if (((debug->lock_type == RW_LOCK_EX)
+			     && !os_thread_eq(thread, cell->thread))
+			    || ((debug->lock_type == RW_LOCK_WAIT_EX)
+				&& !os_thread_eq(thread, cell->thread))
+			    || (debug->lock_type == RW_LOCK_SHARED)) {
+
+				/* The (wait) x-lock request can block
+				infinitely only if someone (can be also cell
+				thread) is holding s-lock, or someone
+				(cannot be cell thread) (wait) x-lock, and
+				he is blocked by start thread */
+
+				ret = sync_array_deadlock_step(
+					arr, start, thread, debug->pass,
+					depth);
+				if (ret) {
+print:
+					ib_logger(ib_stream, "rw-lock %p ",
+						(void*) lock);
+					sync_array_cell_print(ib_stream, cell);
+					rw_lock_debug_print(debug);
+					return(TRUE);
+				}
+			}
+
+			debug = UT_LIST_GET_NEXT(list, debug);
+		}
+
+		return(FALSE);
+
+	} else if (cell->request_type == RW_LOCK_SHARED) {
+
+		lock = cell->wait_object;
+		debug = UT_LIST_GET_FIRST(lock->debug_list);
+
+		while (debug != NULL) {
+
+			thread = debug->thread_id;
+
+			if ((debug->lock_type == RW_LOCK_EX)
+			    || (debug->lock_type == RW_LOCK_WAIT_EX)) {
+
+				/* The s-lock request can block infinitely
+				only if someone (can also be cell thread) is
+				holding (wait) x-lock, and he is blocked by
+				start thread */
+
+				ret = sync_array_deadlock_step(
+					arr, start, thread, debug->pass,
+					depth);
+				if (ret) {
+					goto print;
+				}
+			}
+
+			debug = UT_LIST_GET_NEXT(list, debug);
+		}
+
+		return(FALSE);
+
+	} else {
+		ut_error;
+	}
+
+	return(TRUE);	/* Execution never reaches this line: for compiler
+			fooling only */
+}
+#endif /* UNIV_SYNC_DEBUG */
+
+/******************************************************************//**
+Determines if we can wake up the thread waiting for a sempahore. */
+UNIV_STATIC
+ibool
+sync_arr_cell_can_wake_up(
+/*======================*/
+	sync_cell_t*	cell)	/*!< in: cell to search */
+{
+	mutex_t*	mutex;
+	rw_lock_t*	lock;
+
+	if (cell->request_type == SYNC_MUTEX) {
+
+		mutex = cell->wait_object;
+
+		if (mutex_get_lock_word(mutex) == 0) {
+
+			return(TRUE);
+		}
+
+	} else if (cell->request_type == RW_LOCK_EX) {
+
+		lock = cell->wait_object;
+
+		if (lock->lock_word > 0) {
+		/* Either unlocked or only read locked. */
+
+			return(TRUE);
+		}
+
+        } else if (cell->request_type == RW_LOCK_WAIT_EX) {
+
+		lock = cell->wait_object;
+
+                /* lock_word == 0 means all readers have left */
+		if (lock->lock_word == 0) {
+
+			return(TRUE);
+		}
+	} else if (cell->request_type == RW_LOCK_SHARED) {
+		lock = cell->wait_object;
+
+                /* lock_word > 0 means no writer or reserved writer */
+		if (lock->lock_word > 0) {
+
+			return(TRUE);
+		}
+	}
+
+	return(FALSE);
+}
+
+/******************************************************************//**
+Frees the cell. NOTE! sync_array_wait_event frees the cell
+automatically! */
+UNIV_INTERN
+void
+sync_array_free_cell(
+/*=================*/
+	sync_array_t*	arr,	/*!< in: wait array */
+	ulint		index)  /*!< in: index of the cell in array */
+{
+	sync_cell_t*	cell;
+
+	sync_array_enter(arr);
+
+	cell = sync_array_get_nth_cell(arr, index);
+
+	ut_a(cell->wait_object != NULL);
+
+	cell->waiting = FALSE;
+	cell->wait_object =  NULL;
+	cell->signal_count = 0;
+
+	ut_a(arr->n_reserved > 0);
+	arr->n_reserved--;
+
+	sync_array_exit(arr);
+}
+
+/**********************************************************************//**
+Increments the signalled count. */
+UNIV_INTERN
+void
+sync_array_object_signalled(
+/*========================*/
+	sync_array_t*	arr)	/*!< in: wait array */
+{
+#ifdef HAVE_ATOMIC_BUILTINS
+	(void) os_atomic_increment_ulint(&arr->sg_count, 1);
+#else
+	sync_array_enter(arr);
+
+	arr->sg_count++;
+
+	sync_array_exit(arr);
+#endif
+}
+
+/**********************************************************************//**
+If the wakeup algorithm does not work perfectly at semaphore relases,
+this function will do the waking (see the comment in mutex_exit). This
+function should be called about every 1 second in the server.
+
+Note that there's a race condition between this thread and mutex_exit
+changing the lock_word and calling signal_object, so sometimes this finds
+threads to wake up even when nothing has gone wrong. */
+UNIV_INTERN
+void
+sync_arr_wake_threads_if_sema_free(void)
+/*====================================*/
+{
+	sync_array_t*	arr	= sync_primary_wait_array;
+	sync_cell_t*	cell;
+	ulint		count;
+	ulint		i;
+	os_event_t      event;
+
+	sync_array_enter(arr);
+
+	i = 0;
+	count = 0;
+
+	while (count < arr->n_reserved) {
+
+		cell = sync_array_get_nth_cell(arr, i);
+		i++;
+
+		if (cell->wait_object == NULL) {
+			continue;
+		}
+			count++;
+
+			if (sync_arr_cell_can_wake_up(cell)) {
+
+			event = sync_cell_get_event(cell);
+
+			os_event_set(event);
+		}
+
+	}
+
+	sync_array_exit(arr);
+}
+
+/**********************************************************************//**
+Prints warnings of long semaphore waits to ib_stream.
+@return	TRUE if fatal semaphore wait threshold was exceeded */
+UNIV_INTERN
+ibool
+sync_array_print_long_waits(void)
+/*=============================*/
+{
+	sync_cell_t*	cell;
+	ibool		old_val;
+	ibool		noticed = FALSE;
+	ulint		i;
+	ulint		fatal_timeout = srv_fatal_semaphore_wait_threshold;
+	ibool		fatal = FALSE;
+
+	for (i = 0; i < sync_primary_wait_array->n_cells; i++) {
+
+		cell = sync_array_get_nth_cell(sync_primary_wait_array, i);
+
+		if (cell->wait_object != NULL && cell->waiting
+		    && difftime(time(NULL), cell->reservation_time) > 240) {
+			ib_logger(ib_stream,
+				"InnoDB: Warning: a long semaphore wait:\n");
+			sync_array_cell_print(ib_stream, cell);
+			noticed = TRUE;
+		}
+
+		if (cell->wait_object != NULL && cell->waiting
+		    && difftime(time(NULL), cell->reservation_time)
+		    > fatal_timeout) {
+			fatal = TRUE;
+		}
+	}
+
+	if (noticed) {
+		ib_logger(ib_stream,
+			"InnoDB: ###### Starts InnoDB Monitor"
+			" for 30 secs to print diagnostic info:\n");
+		old_val = srv_print_innodb_monitor;
+
+		/* If some crucial semaphore is reserved, then also the InnoDB
+		Monitor can hang, and we do not get diagnostics. Since in
+		many cases an InnoDB hang is caused by a pwrite() or a pread()
+		call hanging inside the operating system, let us print right
+		now the values of pending calls of these. */
+
+		ib_logger(ib_stream,
+			"InnoDB: Pending preads %lu, pwrites %lu\n",
+			(ulong)os_file_n_pending_preads,
+			(ulong)os_file_n_pending_pwrites);
+
+		srv_print_innodb_monitor = TRUE;
+		os_event_set(srv_lock_timeout_thread_event);
+
+		os_thread_sleep(30000000);
+
+		srv_print_innodb_monitor = old_val;
+		ib_logger(ib_stream,
+			"InnoDB: ###### Diagnostic info printed"
+			" to the standard error stream\n");
+	}
+
+	return(fatal);
+}
+
+/**********************************************************************//**
+Prints info of the wait array. */
+UNIV_STATIC
+void
+sync_array_output_info(
+/*===================*/
+	ib_stream_t	ib_stream,	/*!< in: stream where to print */
+	sync_array_t*	arr)		/*!< in: wait array; NOTE! caller
+					must own the mutex */
+{
+	sync_cell_t*	cell;
+	ulint		count;
+	ulint		i;
+
+	ib_logger(ib_stream,
+		"OS WAIT ARRAY INFO: reservation count %ld, signal count %ld\n",
+		(long) arr->res_count, (long) arr->sg_count);
+	i = 0;
+	count = 0;
+
+	while (count < arr->n_reserved) {
+
+		cell = sync_array_get_nth_cell(arr, i);
+
+	if (cell->wait_object != NULL) {
+		count++;
+			sync_array_cell_print(ib_stream, cell);
+		}
+
+		i++;
+	}
+}
+
+/**********************************************************************//**
+Prints info of the wait array. */
+UNIV_INTERN
+void
+sync_array_print_info(
+/*==================*/
+	ib_stream_t	ib_stream,	/*!< in: file where to print */
+	sync_array_t*	arr)		/*!< in: wait array */
+{
+	sync_array_enter(arr);
+
+	sync_array_output_info(ib_stream, arr);
+
+	sync_array_exit(arr);
+}
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+Copyright (c) 2008, Google Inc.
+
+Portions of this file contain modifications contributed and copyrighted by
+Google, Inc. Those modifications are gratefully acknowledged and are described
+briefly in the InnoDB documentation. The contributions by Google are
+incorporated with their permission, and subject to the conditions contained in
+the file COPYING.Google.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file sync/sync0rw.c
+The read-write lock (for thread synchronization)
+
+Created 9/11/1995 Heikki Tuuri
+*******************************************************/
+
+#include "sync0rw.h"
+#ifdef UNIV_NONINL
+#include "sync0rw.ic"
+#endif
+
+#include "os0thread.h"
+#include "mem0mem.h"
+#include "srv0srv.h"
+#include "os0sync.h" /* for INNODB_RW_LOCKS_USE_ATOMICS */
+
+/*
+	IMPLEMENTATION OF THE RW_LOCK
+	=============================
+The status of a rw_lock is held in lock_word. The initial value of lock_word is
+X_LOCK_DECR. lock_word is decremented by 1 for each s-lock and by X_LOCK_DECR
+for each x-lock. This describes the lock state for each value of lock_word:
+
+lock_word == X_LOCK_DECR:      Unlocked.
+0 < lock_word < X_LOCK_DECR:   Read locked, no waiting writers.
+			       (X_LOCK_DECR - lock_word) is the
+			       number of readers that hold the lock.
+lock_word == 0:		       Write locked
+-X_LOCK_DECR < lock_word < 0:  Read locked, with a waiting writer.
+			       (-lock_word) is the number of readers
+			       that hold the lock.
+lock_word <= -X_LOCK_DECR:     Recursively write locked. lock_word has been
+			       decremented by X_LOCK_DECR once for each lock,
+			       so the number of locks is:
+			       ((-lock_word) / X_LOCK_DECR) + 1
+When lock_word <= -X_LOCK_DECR, we also know that lock_word % X_LOCK_DECR == 0:
+other values of lock_word are invalid.
+
+The lock_word is always read and updated atomically and consistently, so that
+it always represents the state of the lock, and the state of the lock changes
+with a single atomic operation. This lock_word holds all of the information
+that a thread needs in order to determine if it is eligible to gain the lock
+or if it must spin or sleep. The one exception to this is that writer_thread
+must be verified before recursive write locks: to solve this scenario, we make
+writer_thread readable by all threads, but only writeable by the x-lock holder.
+
+The other members of the lock obey the following rules to remain consistent:
+
+recursive:	This and the writer_thread field together control the
+		behaviour of recursive x-locking.
+		lock->recursive must be FALSE in following states:
+			1) The writer_thread contains garbage i.e.: the
+			lock has just been initialized.
+			2) The lock is not x-held and there is no
+			x-waiter waiting on WAIT_EX event.
+			3) The lock is x-held or there is an x-waiter
+			waiting on WAIT_EX event but the 'pass' value
+			is non-zero.
+		lock->recursive is TRUE iff:
+			1) The lock is x-held or there is an x-waiter
+			waiting on WAIT_EX event and the 'pass' value
+			is zero.
+		This flag must be set after the writer_thread field
+		has been updated with a memory ordering barrier.
+		It is unset before the lock_word has been incremented.
+writer_thread:	Is used only in recursive x-locking. Can only be safely
+		read iff lock->recursive flag is TRUE.
+		This field is uninitialized at lock creation time and
+		is updated atomically when x-lock is acquired or when
+		move_ownership is called. A thread is only allowed to
+		set the value of this field to it's thread_id i.e.: a
+		thread cannot set writer_thread to some other thread's
+		id.
+waiters:	May be set to 1 anytime, but to avoid unnecessary wake-up
+		signals, it should only be set to 1 when there are threads
+		waiting on event. Must be 1 when a writer starts waiting to
+		ensure the current x-locking thread sends a wake-up signal
+		during unlock. May only be reset to 0 immediately before a
+		a wake-up signal is sent to event. On most platforms, a
+		memory barrier is required after waiters is set, and before
+		verifying lock_word is still held, to ensure some unlocker
+		really does see the flags new value.
+event:		Threads wait on event for read or writer lock when another
+		thread has an x-lock or an x-lock reservation (wait_ex). A
+		thread may only	wait on event after performing the following
+		actions in order:
+		   (1) Record the counter value of event (with os_event_reset).
+		   (2) Set waiters to 1.
+		   (3) Verify lock_word <= 0.
+		(1) must come before (2) to ensure signal is not missed.
+		(2) must come before (3) to ensure a signal is sent.
+		These restrictions force the above ordering.
+		Immediately before sending the wake-up signal, we should:
+		   (1) Verify lock_word == X_LOCK_DECR (unlocked)
+		   (2) Reset waiters to 0.
+wait_ex_event:	A thread may only wait on the wait_ex_event after it has
+		performed the following actions in order:
+		   (1) Decrement lock_word by X_LOCK_DECR.
+		   (2) Record counter value of wait_ex_event (os_event_reset,
+                       called from sync_array_reserve_cell).
+		   (3) Verify that lock_word < 0.
+		(1) must come first to ensures no other threads become reader
+                or next writer, and notifies unlocker that signal must be sent.
+                (2) must come before (3) to ensure the signal is not missed.
+		These restrictions force the above ordering.
+		Immediately before sending the wake-up signal, we should:
+		   Verify lock_word == 0 (waiting thread holds x_lock)
+*/
+
+
+/** number of spin waits on rw-latches,
+resulted during shared (read) locks */
+UNIV_INTERN ib_int64_t	rw_s_spin_wait_count	= 0;
+/** number of spin loop rounds on rw-latches,
+resulted during shared (read) locks */
+UNIV_INTERN ib_int64_t	rw_s_spin_round_count	= 0;
+
+/** number of OS waits on rw-latches,
+resulted during shared (read) locks */
+UNIV_INTERN ib_int64_t	rw_s_os_wait_count	= 0;
+
+/** number of unlocks (that unlock shared locks),
+set only when UNIV_SYNC_PERF_STAT is defined */
+UNIV_INTERN ib_int64_t	rw_s_exit_count		= 0;
+
+/** number of spin waits on rw-latches,
+resulted during exclusive (write) locks */
+UNIV_INTERN ib_int64_t	rw_x_spin_wait_count	= 0;
+/** number of spin loop rounds on rw-latches,
+resulted during exclusive (write) locks */
+UNIV_INTERN ib_int64_t	rw_x_spin_round_count	= 0;
+
+/** number of OS waits on rw-latches,
+resulted during exclusive (write) locks */
+UNIV_INTERN ib_int64_t	rw_x_os_wait_count	= 0;
+
+/** number of unlocks (that unlock exclusive locks),
+set only when UNIV_SYNC_PERF_STAT is defined */
+UNIV_INTERN ib_int64_t	rw_x_exit_count		= 0;
+
+/* The global list of rw-locks */
+UNIV_INTERN rw_lock_list_t	rw_lock_list;
+UNIV_INTERN mutex_t		rw_lock_list_mutex;
+
+#ifdef UNIV_SYNC_DEBUG
+/* The global mutex which protects debug info lists of all rw-locks.
+To modify the debug info list of an rw-lock, this mutex has to be
+acquired in addition to the mutex protecting the lock. */
+
+UNIV_INTERN mutex_t		rw_lock_debug_mutex;
+/* If deadlock detection does not get immediately the mutex,
+it may wait for this event */
+UNIV_INTERN os_event_t		rw_lock_debug_event;
+/* This is set to TRUE, if there may be waiters for the event */
+UNIV_INTERN ibool		rw_lock_debug_waiters;
+
+/******************************************************************//**
+Creates a debug info struct. */
+UNIV_STATIC
+rw_lock_debug_t*
+rw_lock_debug_create(void);
+/*======================*/
+/******************************************************************//**
+Frees a debug info struct. */
+UNIV_STATIC
+void
+rw_lock_debug_free(
+/*===============*/
+	rw_lock_debug_t* info);
+
+/******************************************************************//**
+Creates a debug info struct.
+@return	own: debug info struct */
+UNIV_STATIC
+rw_lock_debug_t*
+rw_lock_debug_create(void)
+/*======================*/
+{
+	return((rw_lock_debug_t*) mem_alloc(sizeof(rw_lock_debug_t)));
+}
+
+/******************************************************************//**
+Frees a debug info struct. */
+UNIV_STATIC
+void
+rw_lock_debug_free(
+/*===============*/
+	rw_lock_debug_t* info)
+{
+	mem_free(info);
+}
+#endif /* UNIV_SYNC_DEBUG */
+
+/******************************************************************//**
+Reset the variables. */
+UNIV_INTERN
+void
+rw_lock_var_init(void)
+/*==================*/
+{
+	rw_s_spin_wait_count	= 0;
+	rw_s_os_wait_count	= 0;
+	rw_s_exit_count		= 0;
+	rw_x_spin_wait_count	= 0;
+	rw_x_os_wait_count	= 0;
+	rw_x_exit_count		= 0;
+
+	memset(&rw_lock_list, 0x0, sizeof(rw_lock_list));
+	memset(&rw_lock_list_mutex, 0x0, sizeof(rw_lock_list_mutex));
+
+#ifdef UNIV_SYNC_DEBUG
+	memset(&rw_lock_debug_mutex, 0x0, sizeof(rw_lock_debug_mutex));
+	memset(&rw_lock_debug_event, 0x0, sizeof(rw_lock_debug_event));
+	memset(&rw_lock_debug_waiters, 0x0, sizeof(rw_lock_debug_waiters));
+#endif
+}
+
+/**********************************************************************
+Creates, or rather, initializes an rw-lock object in a specified memory
+location (which must be appropriately aligned). The rw-lock is initialized
+to the non-locked state. Explicit freeing of the rw-lock with rw_lock_free
+is necessary only if the memory block containing it is freed. */
+UNIV_INTERN
+void
+rw_lock_create_func(
+/*================*/
+	rw_lock_t*	lock,		/*!< in: pointer to memory */
+#ifdef UNIV_DEBUG
+# ifdef UNIV_SYNC_DEBUG
+	ulint		level,		/*!< in: level */
+# endif /* UNIV_SYNC_DEBUG */
+	const char*	cmutex_name, 	/*!< in: mutex name */
+#endif /* UNIV_DEBUG */
+	const char*	cfile_name,	/*!< in: file name where created */
+	ulint		cline)		/*!< in: file line where created */
+{
+	/* If this is the very first time a synchronization object is
+	created, then the following call initializes the sync system. */
+
+#ifndef INNODB_RW_LOCKS_USE_ATOMICS
+	mutex_create(rw_lock_get_mutex(lock), SYNC_NO_ORDER_CHECK);
+
+	lock->mutex.cfile_name = cfile_name;
+	lock->mutex.cline = cline;
+
+	ut_d(lock->mutex.cmutex_name = cmutex_name);
+	ut_d(lock->mutex.mutex_type = 1);
+#else /* INNODB_RW_LOCKS_USE_ATOMICS */
+# ifdef UNIV_DEBUG
+	UT_NOT_USED(cmutex_name);
+# endif
+#endif /* INNODB_RW_LOCKS_USE_ATOMICS */
+
+	lock->lock_word = X_LOCK_DECR;
+	lock->waiters = 0;
+
+	/* We set this value to signify that lock->writer_thread
+	contains garbage at initialization and cannot be used for
+	recursive x-locking. */
+	lock->recursive = FALSE;
+
+#ifdef UNIV_SYNC_DEBUG
+	UT_LIST_INIT(lock->debug_list);
+
+	lock->level = level;
+#endif /* UNIV_SYNC_DEBUG */
+
+	lock->magic_n = RW_LOCK_MAGIC_N;
+
+	lock->cfile_name = cfile_name;
+	lock->cline = (unsigned int) cline;
+
+	lock->count_os_wait = 0;
+	lock->last_s_file_name = "not yet reserved";
+	lock->last_x_file_name = "not yet reserved";
+	lock->last_s_line = 0;
+	lock->last_x_line = 0;
+	lock->event = os_event_create(NULL);
+	lock->wait_ex_event = os_event_create(NULL);
+
+	mutex_enter(&rw_lock_list_mutex);
+
+	if (UT_LIST_GET_LEN(rw_lock_list) > 0) {
+		ut_a(UT_LIST_GET_FIRST(rw_lock_list)->magic_n
+		     == RW_LOCK_MAGIC_N);
+	}
+
+	UT_LIST_ADD_FIRST(list, rw_lock_list, lock);
+
+	mutex_exit(&rw_lock_list_mutex);
+}
+
+/******************************************************************//**
+Calling this function is obligatory only if the memory buffer containing
+the rw-lock is freed. Removes an rw-lock object from the global list. The
+rw-lock is checked to be in the non-locked state. */
+UNIV_INTERN
+void
+rw_lock_free(
+/*=========*/
+	rw_lock_t*	lock)	/*!< in: rw-lock */
+{
+	ut_ad(rw_lock_validate(lock));
+	ut_a(lock->lock_word == X_LOCK_DECR);
+
+	lock->magic_n = 0;
+
+#ifndef INNODB_RW_LOCKS_USE_ATOMICS
+	mutex_free(rw_lock_get_mutex(lock));
+#endif /* INNODB_RW_LOCKS_USE_ATOMICS */
+
+	mutex_enter(&rw_lock_list_mutex);
+	os_event_free(lock->event);
+
+	os_event_free(lock->wait_ex_event);
+
+	if (UT_LIST_GET_PREV(list, lock)) {
+		ut_a(UT_LIST_GET_PREV(list, lock)->magic_n == RW_LOCK_MAGIC_N);
+	}
+	if (UT_LIST_GET_NEXT(list, lock)) {
+		ut_a(UT_LIST_GET_NEXT(list, lock)->magic_n == RW_LOCK_MAGIC_N);
+	}
+
+	UT_LIST_REMOVE(list, rw_lock_list, lock);
+
+	mutex_exit(&rw_lock_list_mutex);
+}
+
+#ifdef UNIV_DEBUG
+/******************************************************************//**
+Checks that the rw-lock has been initialized and that there are no
+simultaneous shared and exclusive locks.
+@return	TRUE */
+UNIV_INTERN
+ibool
+rw_lock_validate(
+/*=============*/
+	rw_lock_t*	lock)	/*!< in: rw-lock */
+{
+	ut_a(lock);
+
+	ulint waiters = rw_lock_get_waiters(lock);
+	lint lock_word = lock->lock_word;
+
+	ut_a(lock->magic_n == RW_LOCK_MAGIC_N);
+	ut_a(waiters == 0 || waiters == 1);
+	ut_a(lock_word > -X_LOCK_DECR ||(-lock_word) % X_LOCK_DECR == 0);
+
+	return(TRUE);
+}
+#endif /* UNIV_DEBUG */
+
+/******************************************************************//**
+Lock an rw-lock in shared mode for the current thread. If the rw-lock is
+locked in exclusive mode, or there is an exclusive lock request waiting,
+the function spins a preset time (controlled by SYNC_SPIN_ROUNDS), waiting
+for the lock, before suspending the thread. */
+UNIV_INTERN
+void
+rw_lock_s_lock_spin(
+/*================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass,	/*!< in: pass value; != 0, if the lock
+				will be passed to another thread to unlock */
+	const char*	file_name, /*!< in: file name where lock requested */
+	ulint		line)	/*!< in: line where requested */
+{
+	ulint	 index;	/* index of the reserved wait cell */
+	ulint	 i = 0;	/* spin round count */
+
+	ut_ad(rw_lock_validate(lock));
+
+	rw_s_spin_wait_count++;	/*!< Count calls to this function */
+lock_loop:
+
+	/* Spin waiting for the writer field to become free */
+	while (i < SYNC_SPIN_ROUNDS && lock->lock_word <= 0) {
+		if (srv_spin_wait_delay) {
+			ut_delay(ut_rnd_interval(0, srv_spin_wait_delay));
+		}
+
+		i++;
+	}
+
+	if (i == SYNC_SPIN_ROUNDS) {
+		os_thread_yield();
+	}
+
+	if (srv_print_latch_waits) {
+		ib_logger(ib_stream,
+			"Thread %lu spin wait rw-s-lock at %p"
+			" cfile %s cline %lu rnds %lu\n",
+			(ulong) os_thread_pf(os_thread_get_curr_id()),
+			(void*) lock,
+			lock->cfile_name, (ulong) lock->cline, (ulong) i);
+	}
+
+	/* We try once again to obtain the lock */
+	if (TRUE == rw_lock_s_lock_low(lock, pass, file_name, line)) {
+		rw_s_spin_round_count += i;
+
+		return; /* Success */
+	} else {
+
+		if (i < SYNC_SPIN_ROUNDS) {
+			goto lock_loop;
+		}
+
+		rw_s_spin_round_count += i;
+
+		sync_array_reserve_cell(sync_primary_wait_array,
+					lock, RW_LOCK_SHARED,
+					file_name, line,
+					&index);
+
+		/* Set waiters before checking lock_word to ensure wake-up
+                signal is sent. This may lead to some unnecessary signals. */
+		rw_lock_set_waiter_flag(lock);
+
+		if (TRUE == rw_lock_s_lock_low(lock, pass, file_name, line)) {
+			sync_array_free_cell(sync_primary_wait_array, index);
+			return; /* Success */
+		}
+
+		if (srv_print_latch_waits) {
+			ib_logger(ib_stream,
+				"Thread %lu OS wait rw-s-lock at %p"
+				" cfile %s cline %lu\n",
+				os_thread_pf(os_thread_get_curr_id()),
+				(void*) lock, lock->cfile_name,
+				(ulong) lock->cline);
+		}
+
+		/* these stats may not be accurate */
+		lock->count_os_wait++;
+		rw_s_os_wait_count++;
+
+		sync_array_wait_event(sync_primary_wait_array, index);
+
+		i = 0;
+		goto lock_loop;
+	}
+}
+
+/******************************************************************//**
+This function is used in the insert buffer to move the ownership of an
+x-latch on a buffer frame to the current thread. The x-latch was set by
+the buffer read operation and it protected the buffer frame while the
+read was done. The ownership is moved because we want that the current
+thread is able to acquire a second x-latch which is stored in an mtr.
+This, in turn, is needed to pass the debug checks of index page
+operations. */
+UNIV_INTERN
+void
+rw_lock_x_lock_move_ownership(
+/*==========================*/
+	rw_lock_t*	lock)	/*!< in: lock which was x-locked in the
+				buffer read */
+{
+	ut_ad(rw_lock_is_locked(lock, RW_LOCK_EX));
+
+	rw_lock_set_writer_id_and_recursion_flag(lock, TRUE);
+}
+
+/******************************************************************//**
+Function for the next writer to call. Waits for readers to exit.
+The caller must have already decremented lock_word by X_LOCK_DECR. */
+UNIV_INLINE
+void
+rw_lock_x_lock_wait(
+/*================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+#ifdef UNIV_SYNC_DEBUG
+	ulint		pass,	/*!< in: pass value; != 0, if the lock will
+				be passed to another thread to unlock */
+#endif
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line)	/*!< in: line where requested */
+{
+	ulint index;
+	ulint i = 0;
+
+	ut_ad(lock->lock_word <= 0);
+
+	while (lock->lock_word < 0) {
+		if (srv_spin_wait_delay) {
+			ut_delay(ut_rnd_interval(0, srv_spin_wait_delay));
+		}
+		if(i < SYNC_SPIN_ROUNDS) {
+			i++;
+			continue;
+		}
+
+		/* If there is still a reader, then go to sleep.*/
+		rw_x_spin_round_count += i;
+		i = 0;
+		sync_array_reserve_cell(sync_primary_wait_array,
+					lock,
+					RW_LOCK_WAIT_EX,
+					file_name, line,
+					&index);
+		/* Check lock_word to ensure wake-up isn't missed.*/
+		if(lock->lock_word < 0) {
+
+			/* these stats may not be accurate */
+			lock->count_os_wait++;
+			rw_x_os_wait_count++;
+
+                        /* Add debug info as it is needed to detect possible
+                        deadlock. We must add info for WAIT_EX thread for
+                        deadlock detection to work properly. */
+#ifdef UNIV_SYNC_DEBUG
+			rw_lock_add_debug_info(lock, pass, RW_LOCK_WAIT_EX,
+					       file_name, line);
+#endif
+
+			sync_array_wait_event(sync_primary_wait_array,
+					      index);
+#ifdef UNIV_SYNC_DEBUG
+			rw_lock_remove_debug_info(lock, pass,
+					       RW_LOCK_WAIT_EX);
+#endif
+                        /* It is possible to wake when lock_word < 0.
+                        We must pass the while-loop check to proceed.*/
+		} else {
+			sync_array_free_cell(sync_primary_wait_array,
+					     index);
+		}
+	}
+	rw_x_spin_round_count += i;
+}
+
+/******************************************************************//**
+Low-level function for acquiring an exclusive lock.
+@return	RW_LOCK_NOT_LOCKED if did not succeed, RW_LOCK_EX if success. */
+UNIV_INLINE
+ibool
+rw_lock_x_lock_low(
+/*===============*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass,	/*!< in: pass value; != 0, if the lock will
+				be passed to another thread to unlock */
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line)	/*!< in: line where requested */
+{
+	os_thread_id_t	curr_thread	= os_thread_get_curr_id();
+
+	if (rw_lock_lock_word_decr(lock, X_LOCK_DECR)) {
+
+		/* lock->recursive also tells us if the writer_thread
+		field is stale or active. As we are going to write
+		our own thread id in that field it must be that the
+		current writer_thread value is not active. */
+		ut_a(!lock->recursive);
+
+		/* Decrement occurred: we are writer or next-writer. */
+		rw_lock_set_writer_id_and_recursion_flag(lock,
+						pass ? FALSE : TRUE);
+
+		rw_lock_x_lock_wait(lock,
+#ifdef UNIV_SYNC_DEBUG
+				    pass,
+#endif
+                                    file_name, line);
+
+	} else {
+		/* Decrement failed: relock or failed lock */
+		if (!pass && lock->recursive
+		    && os_thread_eq(lock->writer_thread, curr_thread)) {
+			/* Relock */
+                        lock->lock_word -= X_LOCK_DECR;
+		} else {
+			/* Another thread locked before us */
+			return(FALSE);
+		}
+	}
+#ifdef UNIV_SYNC_DEBUG
+	rw_lock_add_debug_info(lock, pass, RW_LOCK_EX,
+			       file_name, line);
+#endif
+	lock->last_x_file_name = file_name;
+	lock->last_x_line = (unsigned int) line;
+
+	return(TRUE);
+}
+
+/******************************************************************//**
+NOTE! Use the corresponding macro, not directly this function! Lock an
+rw-lock in exclusive mode for the current thread. If the rw-lock is locked
+in shared or exclusive mode, or there is an exclusive lock request waiting,
+the function spins a preset time (controlled by SYNC_SPIN_ROUNDS), waiting
+for the lock before suspending the thread. If the same thread has an x-lock
+on the rw-lock, locking succeed, with the following exception: if pass != 0,
+only a single x-lock may be taken on the lock. NOTE: If the same thread has
+an s-lock, locking does not succeed! */
+UNIV_INTERN
+void
+rw_lock_x_lock_func(
+/*================*/
+	rw_lock_t*	lock,	/*!< in: pointer to rw-lock */
+	ulint		pass,	/*!< in: pass value; != 0, if the lock will
+				be passed to another thread to unlock */
+	const char*	file_name,/*!< in: file name where lock requested */
+	ulint		line)	/*!< in: line where requested */
+{
+	ulint	index;	/*!< index of the reserved wait cell */
+	ulint	i;	/*!< spin round count */
+	ibool   spinning = FALSE;
+
+	ut_ad(rw_lock_validate(lock));
+
+	i = 0;
+
+lock_loop:
+
+	if (rw_lock_x_lock_low(lock, pass, file_name, line)) {
+		rw_x_spin_round_count += i;
+
+		return;	/* Locking succeeded */
+
+	} else {
+
+                if (!spinning) {
+                        spinning = TRUE;
+                        rw_x_spin_wait_count++;
+		}
+
+		/* Spin waiting for the lock_word to become free */
+		while (i < SYNC_SPIN_ROUNDS
+		       && lock->lock_word <= 0) {
+			if (srv_spin_wait_delay) {
+				ut_delay(ut_rnd_interval(0,
+							 srv_spin_wait_delay));
+			}
+
+			i++;
+		}
+		if (i == SYNC_SPIN_ROUNDS) {
+			os_thread_yield();
+		} else {
+			goto lock_loop;
+		}
+	}
+
+	rw_x_spin_round_count += i;
+
+	if (srv_print_latch_waits) {
+		ib_logger(ib_stream,
+			"Thread %lu spin wait rw-x-lock at %p"
+			" cfile %s cline %lu rnds %lu\n",
+			os_thread_pf(os_thread_get_curr_id()), (void*) lock,
+			lock->cfile_name, (ulong) lock->cline, (ulong) i);
+	}
+
+	sync_array_reserve_cell(sync_primary_wait_array,
+				lock,
+				RW_LOCK_EX,
+				file_name, line,
+				&index);
+
+	/* Waiters must be set before checking lock_word, to ensure signal
+	is sent. This could lead to a few unnecessary wake-up signals. */
+	rw_lock_set_waiter_flag(lock);
+
+	if (rw_lock_x_lock_low(lock, pass, file_name, line)) {
+		sync_array_free_cell(sync_primary_wait_array, index);
+		return; /* Locking succeeded */
+	}
+
+	if (srv_print_latch_waits) {
+		ib_logger(ib_stream,
+			"Thread %lu OS wait for rw-x-lock at %p"
+			" cfile %s cline %lu\n",
+			os_thread_pf(os_thread_get_curr_id()), (void*) lock,
+			lock->cfile_name, (ulong) lock->cline);
+	}
+
+	/* these stats may not be accurate */
+	lock->count_os_wait++;
+	rw_x_os_wait_count++;
+
+	sync_array_wait_event(sync_primary_wait_array, index);
+
+	i = 0;
+	goto lock_loop;
+}
+
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Acquires the debug mutex. We cannot use the mutex defined in sync0sync,
+because the debug mutex is also acquired in sync0arr while holding the OS
+mutex protecting the sync array, and the ordinary mutex_enter might
+recursively call routines in sync0arr, leading to a deadlock on the OS
+mutex. */
+UNIV_INTERN
+void
+rw_lock_debug_mutex_enter(void)
+/*==========================*/
+{
+loop:
+	if (0 == mutex_enter_nowait(&rw_lock_debug_mutex)) {
+		return;
+	}
+
+	os_event_reset(rw_lock_debug_event);
+
+	rw_lock_debug_waiters = TRUE;
+
+	if (0 == mutex_enter_nowait(&rw_lock_debug_mutex)) {
+		return;
+	}
+
+	os_event_wait(rw_lock_debug_event);
+
+	goto loop;
+}
+
+/******************************************************************//**
+Releases the debug mutex. */
+UNIV_INTERN
+void
+rw_lock_debug_mutex_exit(void)
+/*==========================*/
+{
+	mutex_exit(&rw_lock_debug_mutex);
+
+	if (rw_lock_debug_waiters) {
+		rw_lock_debug_waiters = FALSE;
+		os_event_set(rw_lock_debug_event);
+	}
+}
+
+/******************************************************************//**
+Inserts the debug information for an rw-lock. */
+UNIV_INTERN
+void
+rw_lock_add_debug_info(
+/*===================*/
+	rw_lock_t*	lock,		/*!< in: rw-lock */
+	ulint		pass,		/*!< in: pass value */
+	ulint		lock_type,	/*!< in: lock type */
+	const char*	file_name,	/*!< in: file where requested */
+	ulint		line)		/*!< in: line where requested */
+{
+	rw_lock_debug_t*	info;
+
+	ut_ad(lock);
+	ut_ad(file_name);
+
+	info = rw_lock_debug_create();
+
+	rw_lock_debug_mutex_enter();
+
+	info->file_name = file_name;
+	info->line	= line;
+	info->lock_type = lock_type;
+	info->thread_id = os_thread_get_curr_id();
+	info->pass	= pass;
+
+	UT_LIST_ADD_FIRST(list, lock->debug_list, info);
+
+	rw_lock_debug_mutex_exit();
+
+	if ((pass == 0) && (lock_type != RW_LOCK_WAIT_EX)) {
+		sync_thread_add_level(lock, lock->level);
+	}
+}
+
+/******************************************************************//**
+Removes a debug information struct for an rw-lock. */
+UNIV_INTERN
+void
+rw_lock_remove_debug_info(
+/*======================*/
+	rw_lock_t*	lock,		/*!< in: rw-lock */
+	ulint		pass,		/*!< in: pass value */
+	ulint		lock_type)	/*!< in: lock type */
+{
+	rw_lock_debug_t*	info;
+
+	ut_ad(lock);
+
+	if ((pass == 0) && (lock_type != RW_LOCK_WAIT_EX)) {
+		sync_thread_reset_level(lock);
+	}
+
+	rw_lock_debug_mutex_enter();
+
+	info = UT_LIST_GET_FIRST(lock->debug_list);
+
+	while (info != NULL) {
+		if ((pass == info->pass)
+		    && ((pass != 0)
+			|| os_thread_eq(info->thread_id,
+					os_thread_get_curr_id()))
+		    && (info->lock_type == lock_type)) {
+
+			/* Found! */
+			UT_LIST_REMOVE(list, lock->debug_list, info);
+			rw_lock_debug_mutex_exit();
+
+			rw_lock_debug_free(info);
+
+			return;
+		}
+
+		info = UT_LIST_GET_NEXT(list, info);
+	}
+
+	ut_error;
+}
+#endif /* UNIV_SYNC_DEBUG */
+
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Checks if the thread has locked the rw-lock in the specified mode, with
+the pass value == 0.
+@return	TRUE if locked */
+UNIV_INTERN
+ibool
+rw_lock_own(
+/*========*/
+	rw_lock_t*	lock,		/*!< in: rw-lock */
+	ulint		lock_type)	/*!< in: lock type: RW_LOCK_SHARED,
+					RW_LOCK_EX */
+{
+	rw_lock_debug_t*	info;
+
+	ut_ad(lock);
+	ut_ad(rw_lock_validate(lock));
+
+	rw_lock_debug_mutex_enter();
+
+	info = UT_LIST_GET_FIRST(lock->debug_list);
+
+	while (info != NULL) {
+
+		if (os_thread_eq(info->thread_id, os_thread_get_curr_id())
+		    && (info->pass == 0)
+		    && (info->lock_type == lock_type)) {
+
+			rw_lock_debug_mutex_exit();
+			/* Found! */
+
+			return(TRUE);
+		}
+
+		info = UT_LIST_GET_NEXT(list, info);
+	}
+	rw_lock_debug_mutex_exit();
+
+	return(FALSE);
+}
+#endif /* UNIV_SYNC_DEBUG */
+
+/******************************************************************//**
+Checks if somebody has locked the rw-lock in the specified mode.
+@return	TRUE if locked */
+UNIV_INTERN
+ibool
+rw_lock_is_locked(
+/*==============*/
+	rw_lock_t*	lock,		/*!< in: rw-lock */
+	ulint		lock_type)	/*!< in: lock type: RW_LOCK_SHARED,
+					RW_LOCK_EX */
+{
+	ibool	ret	= FALSE;
+
+	ut_ad(lock);
+	ut_ad(rw_lock_validate(lock));
+
+	if (lock_type == RW_LOCK_SHARED) {
+		if (rw_lock_get_reader_count(lock) > 0) {
+			ret = TRUE;
+		}
+	} else if (lock_type == RW_LOCK_EX) {
+		if (rw_lock_get_writer(lock) == RW_LOCK_EX) {
+			ret = TRUE;
+		}
+	} else {
+		ut_error;
+	}
+
+	return(ret);
+}
+
+#ifdef UNIV_SYNC_DEBUG
+/***************************************************************//**
+Prints debug info of currently locked rw-locks. */
+UNIV_INTERN
+void
+rw_lock_list_print_info(
+/*====================*/
+	ib_stream_t	ib_stream)	/*!< in: stream where to print */
+{
+	rw_lock_t*	lock;
+	ulint		count		= 0;
+	rw_lock_debug_t* info;
+
+	mutex_enter(&rw_lock_list_mutex);
+
+	ib_logger(ib_stream,
+		  "-------------\n"
+		  "RW-LATCH INFO\n"
+		  "-------------\n");
+
+	lock = UT_LIST_GET_FIRST(rw_lock_list);
+
+	while (lock != NULL) {
+
+		count++;
+
+#ifndef INNODB_RW_LOCKS_USE_ATOMICS
+		mutex_enter(&(lock->mutex));
+#endif
+		if (lock->lock_word != X_LOCK_DECR) {
+
+			ib_logger(ib_stream, "RW-LOCK: %p ", (void*) lock);
+
+			if (rw_lock_get_waiters(lock)) {
+				ib_logger(ib_stream,
+					" Waiters for the lock exist\n");
+			} else {
+				ib_logger(ib_stream, "\n");
+			}
+
+			info = UT_LIST_GET_FIRST(lock->debug_list);
+			while (info != NULL) {
+				rw_lock_debug_print(info);
+				info = UT_LIST_GET_NEXT(list, info);
+			}
+		}
+#ifndef INNODB_RW_LOCKS_USE_ATOMICS
+		mutex_exit(&(lock->mutex));
+#endif
+
+		lock = UT_LIST_GET_NEXT(list, lock);
+	}
+
+	ib_logger(ib_stream, "Total number of rw-locks %ld\n", count);
+	mutex_exit(&rw_lock_list_mutex);
+}
+
+/***************************************************************//**
+Prints debug info of an rw-lock. */
+UNIV_INTERN
+void
+rw_lock_print(
+/*==========*/
+	rw_lock_t*	lock)	/*!< in: rw-lock */
+{
+	rw_lock_debug_t* info;
+
+	ib_logger(ib_stream,
+		"-------------\n"
+		"RW-LATCH INFO\n"
+		"RW-LATCH: %p ", (void*) lock);
+
+#ifndef INNODB_RW_LOCKS_USE_ATOMICS
+	/* We used to acquire lock->mutex here, but it would cause a
+	recursive call to sync_thread_add_level() if UNIV_SYNC_DEBUG
+	is defined.  Since this function is only invoked from
+	sync_thread_levels_g(), let us choose the smaller evil:
+	performing dirty reads instead of causing bogus deadlocks or
+	assertion failures. */
+#endif
+	if (lock->lock_word != X_LOCK_DECR) {
+
+		if (rw_lock_get_waiters(lock)) {
+			ib_logger(ib_stream, " Waiters for the lock exist\n");
+		} else {
+			ib_logger(ib_stream, "\n");
+		}
+
+		info = UT_LIST_GET_FIRST(lock->debug_list);
+		while (info != NULL) {
+			rw_lock_debug_print(info);
+			info = UT_LIST_GET_NEXT(list, info);
+		}
+	}
+}
+
+/*********************************************************************//**
+Prints info of a debug struct. */
+UNIV_INTERN
+void
+rw_lock_debug_print(
+/*================*/
+	rw_lock_debug_t*	info)	/*!< in: debug struct */
+{
+	ulint	rwt;
+
+	rwt	  = info->lock_type;
+
+	ib_logger(ib_stream, "Locked: thread %ld file %s line %ld  ",
+		(ulong) os_thread_pf(info->thread_id), info->file_name,
+		(ulong) info->line);
+	if (rwt == RW_LOCK_SHARED) {
+		ib_logger(ib_stream, "S-LOCK");
+	} else if (rwt == RW_LOCK_EX) {
+		ib_logger(ib_stream, "X-LOCK");
+	} else if (rwt == RW_LOCK_WAIT_EX) {
+		ib_logger(ib_stream, "WAIT X-LOCK");
+	} else {
+		ut_error;
+	}
+	if (info->pass != 0) {
+		ib_logger(ib_stream, " pass value %lu", (ulong) info->pass);
+	}
+	ib_logger(ib_stream, "\n", ib_stream);
+}
+
+/***************************************************************//**
+Returns the number of currently locked rw-locks. Works only in the debug
+version.
+@return	number of locked rw-locks */
+UNIV_INTERN
+ulint
+rw_lock_n_locked(void)
+/*==================*/
+{
+	rw_lock_t*	lock;
+	ulint		count		= 0;
+
+	mutex_enter(&rw_lock_list_mutex);
+
+	lock = UT_LIST_GET_FIRST(rw_lock_list);
+
+	while (lock != NULL) {
+
+		if (lock->lock_word != X_LOCK_DECR) {
+			count++;
+		}
+
+		lock = UT_LIST_GET_NEXT(list, lock);
+	}
+
+	mutex_exit(&rw_lock_list_mutex);
+
+	return(count);
+}
+#endif /* UNIV_SYNC_DEBUG */
+/*****************************************************************************
+
+Copyright (c) 1995, 2010, Innobase Oy. All Rights Reserved.
+Copyright (c) 2008, Google Inc.
+
+Portions of this file contain modifications contributed and copyrighted by
+Google, Inc. Those modifications are gratefully acknowledged and are described
+briefly in the InnoDB documentation. The contributions by Google are
+incorporated with their permission, and subject to the conditions contained in
+the file COPYING.Google.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file sync/sync0sync.c
+Mutex, the basic synchronization primitive
+
+Created 9/5/1995 Heikki Tuuri
+*******************************************************/
+
+#include "sync0sync.h"
+#ifdef UNIV_NONINL
+#include "sync0sync.ic"
+#endif
+
+#include "sync0rw.h"
+#include "buf0buf.h"
+#include "srv0srv.h"
+#include "buf0types.h"
+#include "os0sync.h" /* for HAVE_ATOMIC_BUILTINS */
+
+/*
+	REASONS FOR IMPLEMENTING THE SPIN LOCK MUTEX
+	============================================
+
+Semaphore operations in operating systems are slow: Solaris on a 1993 Sparc
+takes 3 microseconds (us) for a lock-unlock pair and Windows NT on a 1995
+Pentium takes 20 microseconds for a lock-unlock pair. Therefore, we have to
+implement our own efficient spin lock mutex. Future operating systems may
+provide efficient spin locks, but we cannot count on that.
+
+Another reason for implementing a spin lock is that on multiprocessor systems
+it can be more efficient for a processor to run a loop waiting for the
+semaphore to be released than to switch to a different thread. A thread switch
+takes 25 us on both platforms mentioned above. See Gray and Reuter's book
+Transaction processing for background.
+
+How long should the spin loop last before suspending the thread? On a
+uniprocessor, spinning does not help at all, because if the thread owning the
+mutex is not executing, it cannot be released. Spinning actually wastes
+resources.
+
+On a multiprocessor, we do not know if the thread owning the mutex is
+executing or not. Thus it would make sense to spin as long as the operation
+guarded by the mutex would typically last assuming that the thread is
+executing. If the mutex is not released by that time, we may assume that the
+thread owning the mutex is not executing and suspend the waiting thread.
+
+A typical operation (where no i/o involved) guarded by a mutex or a read-write
+lock may last 1 - 20 us on the current Pentium platform. The longest
+operations are the binary searches on an index node.
+
+We conclude that the best choice is to set the spin time at 20 us. Then the
+system should work well on a multiprocessor. On a uniprocessor we have to
+make sure that thread swithches due to mutex collisions are not frequent,
+i.e., they do not happen every 100 us or so, because that wastes too much
+resources. If the thread switches are not frequent, the 20 us wasted in spin
+loop is not too much.
+
+Empirical studies on the effect of spin time should be done for different
+platforms.
+
+
+	IMPLEMENTATION OF THE MUTEX
+	===========================
+
+For background, see Curt Schimmel's book on Unix implementation on modern
+architectures. The key points in the implementation are atomicity and
+serialization of memory accesses. The test-and-set instruction (XCHG in
+Pentium) must be atomic. As new processors may have weak memory models, also
+serialization of memory references may be necessary. The successor of Pentium,
+P6, has at least one mode where the memory model is weak. As far as we know,
+in Pentium all memory accesses are serialized in the program order and we do
+not have to worry about the memory model. On other processors there are
+special machine instructions called a fence, memory barrier, or storage
+barrier (STBAR in Sparc), which can be used to serialize the memory accesses
+to happen in program order relative to the fence instruction.
+
+Leslie Lamport has devised a "bakery algorithm" to implement a mutex without
+the atomic test-and-set, but his algorithm should be modified for weak memory
+models. We do not use Lamport's algorithm, because we guess it is slower than
+the atomic test-and-set.
+
+Our mutex implementation works as follows: After that we perform the atomic
+test-and-set instruction on the memory word. If the test returns zero, we
+know we got the lock first. If the test returns not zero, some other thread
+was quicker and got the lock: then we spin in a loop reading the memory word,
+waiting it to become zero. It is wise to just read the word in the loop, not
+perform numerous test-and-set instructions, because they generate memory
+traffic between the cache and the main memory. The read loop can just access
+the cache, saving bus bandwidth.
+
+If we cannot acquire the mutex lock in the specified time, we reserve a cell
+in the wait array, set the waiters byte in the mutex to 1. To avoid a race
+condition, after setting the waiters byte and before suspending the waiting
+thread, we still have to check that the mutex is reserved, because it may
+have happened that the thread which was holding the mutex has just released
+it and did not see the waiters byte set to 1, a case which would lead the
+other thread to an infinite wait.
+
+LEMMA 1: After a thread resets the event of a mutex (or rw_lock), some
+=======
+thread will eventually call os_event_set() on that particular event.
+Thus no infinite wait is possible in this case.
+
+Proof:	After making the reservation the thread sets the waiters field in the
+mutex to 1. Then it checks that the mutex is still reserved by some thread,
+or it reserves the mutex for itself. In any case, some thread (which may be
+also some earlier thread, not necessarily the one currently holding the mutex)
+will set the waiters field to 0 in mutex_exit, and then call
+os_event_set() with the mutex as an argument.
+Q.E.D.
+
+LEMMA 2: If an os_event_set() call is made after some thread has called
+=======
+the os_event_reset() and before it starts wait on that event, the call
+will not be lost to the second thread. This is true even if there is an
+intervening call to os_event_reset() by another thread.
+Thus no infinite wait is possible in this case.
+
+Proof (non-windows platforms): os_event_reset() returns a monotonically
+increasing value of signal_count. This value is increased at every
+call of os_event_set() If thread A has called os_event_reset() followed
+by thread B calling os_event_set() and then some other thread C calling
+os_event_reset(), the is_set flag of the event will be set to FALSE;
+but now if thread A calls os_event_wait_low() with the signal_count
+value returned from the earlier call of os_event_reset(), it will
+return immediately without waiting.
+Q.E.D.
+
+Proof (windows): If there is a writer thread which is forced to wait for
+the lock, it may be able to set the state of rw_lock to RW_LOCK_WAIT_EX
+The design of rw_lock ensures that there is one and only one thread
+that is able to change the state to RW_LOCK_WAIT_EX and this thread is
+guaranteed to acquire the lock after it is released by the current
+holders and before any other waiter gets the lock.
+On windows this thread waits on a separate event i.e.: wait_ex_event.
+Since only one thread can wait on this event there is no chance
+of this event getting reset before the writer starts wait on it.
+Therefore, this thread is guaranteed to catch the os_set_event()
+signalled unconditionally at the release of the lock.
+Q.E.D. */
+
+/* Number of spin waits on mutexes: for performance monitoring */
+
+/** The number of iterations in the mutex_spin_wait() spin loop.
+Intended for performance monitoring. */
+UNIV_STATIC ib_int64_t	mutex_spin_round_count		= 0;
+/** The number of mutex_spin_wait() calls.  Intended for
+performance monitoring. */
+UNIV_STATIC ib_int64_t	mutex_spin_wait_count		= 0;
+/** The number of OS waits in mutex_spin_wait().  Intended for
+performance monitoring. */
+UNIV_STATIC ib_int64_t	mutex_os_wait_count		= 0;
+/** The number of mutex_exit() calls. Intended for performance
+monitoring. */
+UNIV_INTERN ib_int64_t	mutex_exit_count		= 0;
+
+/** The global array of wait cells for implementation of the database's own
+mutexes and read-write locks */
+UNIV_INTERN sync_array_t*	sync_primary_wait_array;
+
+/** This variable is set to TRUE when sync_init is called */
+UNIV_INTERN ibool	sync_initialized	= FALSE;
+
+/** An acquired mutex or rw-lock and its level in the latching order */
+typedef struct sync_level_struct	sync_level_t;
+/** Mutexes or rw-locks held by a thread */
+typedef struct sync_thread_struct	sync_thread_t;
+
+#ifdef UNIV_SYNC_DEBUG
+/** The latch levels currently owned by threads are stored in this data
+structure; the size of this array is OS_THREAD_MAX_N */
+
+UNIV_INTERN sync_thread_t*	sync_thread_level_arrays;
+
+/** Mutex protecting sync_thread_level_arrays */
+UNIV_STATIC mutex_t		sync_thread_mutex;
+#endif /* UNIV_SYNC_DEBUG */
+
+/** Global list of database mutexes (not OS mutexes) created. */
+UNIV_INTERN ut_list_base_node_t  mutex_list;
+
+/** Mutex protecting the mutex_list variable */
+UNIV_INTERN mutex_t mutex_list_mutex;
+
+#ifdef UNIV_SYNC_DEBUG
+/** Latching order checks start when this is set TRUE */
+UNIV_INTERN ibool	sync_order_checks_on	= FALSE;
+#endif /* UNIV_SYNC_DEBUG */
+
+#ifdef UNIV_DEBUG
+/* FIXME: How is this used in MySQL code ? */
+UNIV_STATIC ibool	timed_mutexes;
+#endif /* UNIV_DEBUG */
+
+struct sync_thread_struct{
+	os_thread_id_t	id;	/*!< OS thread id */
+	sync_level_t*	levels;	/*!< level array for this thread; if
+				this is NULL this slot is unused */
+};
+
+/** Number of slots reserved for each OS thread in the sync level array */
+#define SYNC_THREAD_N_LEVELS	10000
+
+/** An acquired mutex or rw-lock and its level in the latching order */
+struct sync_level_struct{
+	void*	latch;	/*!< pointer to a mutex or an rw-lock; NULL means that
+			the slot is empty */
+	ulint	level;	/*!< level of the latch in the latching order */
+};
+
+/******************************************************************//**
+* Reset variables. */
+UNIV_INTERN
+void
+sync_var_init(void)
+/*===============*/
+{
+	mutex_spin_round_count  = 0;
+	mutex_spin_wait_count = 0;
+	mutex_os_wait_count = 0;
+	mutex_exit_count = 0;
+	sync_primary_wait_array = NULL;
+	sync_initialized = FALSE;
+#ifdef UNIV_SYNC_DEBUG
+	sync_thread_level_arrays = NULL;
+	memset(&sync_thread_mutex, 0x0, sizeof(sync_thread_mutex));
+#endif /* UNIV_SYNC_DEBUG */
+	memset(&mutex_list, 0x0, sizeof(mutex_list));
+	memset(&mutex_list_mutex, 0x0, sizeof(mutex_list_mutex));
+
+#ifdef UNIV_SYNC_DEBUG
+	sync_order_checks_on    = FALSE;
+#endif /* UNIV_SYNC_DEBUG */
+}
+
+/**********************************************************************
+Creates, or rather, initializes a mutex object in a specified memory
+location (which must be appropriately aligned). The mutex is initialized
+in the reset state. Explicit freeing of the mutex with mutex_free is
+necessary only if the memory block containing it is freed. */
+UNIV_INTERN
+void
+mutex_create_func(
+/*==============*/
+	mutex_t*	mutex,		/*!< in: pointer to memory */
+#ifdef UNIV_DEBUG
+	const char*	cmutex_name,	/*!< in: mutex name */
+# ifdef UNIV_SYNC_DEBUG
+	ulint		level,		/*!< in: level */
+# endif /* UNIV_SYNC_DEBUG */
+#endif /* UNIV_DEBUG */
+	const char*	cfile_name,	/*!< in: file name where created */
+	ulint		cline)		/*!< in: file line where created */
+{
+#if defined(HAVE_ATOMIC_BUILTINS)
+	mutex_reset_lock_word(mutex);
+#else
+	os_fast_mutex_init(&(mutex->os_fast_mutex));
+	mutex->lock_word = 0;
+#endif
+	mutex->event = os_event_create(NULL);
+	mutex_set_waiters(mutex, 0);
+#ifdef UNIV_DEBUG
+	mutex->magic_n = MUTEX_MAGIC_N;
+#endif /* UNIV_DEBUG */
+#ifdef UNIV_SYNC_DEBUG
+	mutex->line = 0;
+	mutex->file_name = "not yet reserved";
+	mutex->level = level;
+#endif /* UNIV_SYNC_DEBUG */
+	mutex->cfile_name = cfile_name;
+	mutex->cline = cline;
+	mutex->count_os_wait = 0;
+#ifdef UNIV_DEBUG
+	mutex->cmutex_name=	  cmutex_name;
+	mutex->count_using=	  0;
+	mutex->mutex_type=	  0;
+	mutex->lspent_time=	  0;
+	mutex->lmax_spent_time=     0;
+	mutex->count_spin_loop= 0;
+	mutex->count_spin_rounds=   0;
+	mutex->count_os_yield=  0;
+#endif /* UNIV_DEBUG */
+
+	/* Check that lock_word is aligned; this is important on Intel */
+	ut_ad(((ulint)(&(mutex->lock_word))) % 4 == 0);
+
+	/* NOTE! The very first mutexes are not put to the mutex list */
+
+	if ((mutex == &mutex_list_mutex)
+#ifdef UNIV_SYNC_DEBUG
+	    || (mutex == &sync_thread_mutex)
+#endif /* UNIV_SYNC_DEBUG */
+	    ) {
+
+		return;
+	}
+
+	mutex_enter(&mutex_list_mutex);
+
+	ut_ad(UT_LIST_GET_LEN(mutex_list) == 0
+	      || UT_LIST_GET_FIRST(mutex_list)->magic_n == MUTEX_MAGIC_N);
+
+	UT_LIST_ADD_FIRST(list, mutex_list, mutex);
+
+	mutex_exit(&mutex_list_mutex);
+}
+
+/******************************************************************//**
+Calling this function is obligatory only if the memory buffer containing
+the mutex is freed. Removes a mutex object from the mutex list. The mutex
+is checked to be in the reset state. */
+UNIV_INTERN
+void
+mutex_free(
+/*=======*/
+	mutex_t*	mutex)	/*!< in: mutex */
+{
+	ut_ad(mutex_validate(mutex));
+	ut_a(mutex_get_lock_word(mutex) == 0);
+	ut_a(mutex_get_waiters(mutex) == 0);
+
+#ifdef UNIV_MEM_DEBUG
+	if (mutex == &mem_hash_mutex) {
+		ut_ad(UT_LIST_GET_LEN(mutex_list) == 1);
+		ut_ad(UT_LIST_GET_FIRST(mutex_list) == &mem_hash_mutex);
+		UT_LIST_REMOVE(list, mutex_list, mutex);
+		goto func_exit;
+	}
+#endif /* UNIV_MEM_DEBUG */
+
+	if (mutex != &mutex_list_mutex
+#ifdef UNIV_SYNC_DEBUG
+	    && mutex != &sync_thread_mutex
+#endif /* UNIV_SYNC_DEBUG */
+	    ) {
+
+		mutex_enter(&mutex_list_mutex);
+
+		ut_ad(!UT_LIST_GET_PREV(list, mutex)
+		      || UT_LIST_GET_PREV(list, mutex)->magic_n
+		      == MUTEX_MAGIC_N);
+		ut_ad(!UT_LIST_GET_NEXT(list, mutex)
+		      || UT_LIST_GET_NEXT(list, mutex)->magic_n
+		      == MUTEX_MAGIC_N);
+
+		UT_LIST_REMOVE(list, mutex_list, mutex);
+
+		mutex_exit(&mutex_list_mutex);
+	}
+
+	os_event_free(mutex->event);
+#ifdef UNIV_MEM_DEBUG
+func_exit:
+#endif /* UNIV_MEM_DEBUG */
+#if !defined(HAVE_ATOMIC_BUILTINS)
+	os_fast_mutex_free(&(mutex->os_fast_mutex));
+#endif
+	/* If we free the mutex protecting the mutex list (freeing is
+	not necessary), we have to reset the magic number AFTER removing
+	it from the list. */
+#ifdef UNIV_DEBUG
+	mutex->magic_n = 0;
+#endif /* UNIV_DEBUG */
+}
+
+/********************************************************************//**
+NOTE! Use the corresponding macro in the header file, not this function
+directly. Tries to lock the mutex for the current thread. If the lock is not
+acquired immediately, returns with return value 1.
+@return	0 if succeed, 1 if not */
+UNIV_INTERN
+ulint
+mutex_enter_nowait_func(
+/*====================*/
+	mutex_t*	mutex,		/*!< in: pointer to mutex */
+	const char*	file_name __attribute__((unused)),
+					/*!< in: file name where mutex
+					requested */
+	ulint		line __attribute__((unused)))
+					/*!< in: line where requested */
+{
+	ut_ad(mutex_validate(mutex));
+
+	if (!mutex_test_and_set(mutex)) {
+
+		ut_d(mutex->thread_id = os_thread_get_curr_id());
+#ifdef UNIV_SYNC_DEBUG
+		mutex_set_debug_info(mutex, file_name, line);
+#endif
+
+		return(0);	/* Succeeded! */
+	}
+
+	return(1);
+}
+
+#ifdef UNIV_DEBUG
+/******************************************************************//**
+Checks that the mutex has been initialized.
+@return	TRUE */
+UNIV_INTERN
+ibool
+mutex_validate(
+/*===========*/
+	const mutex_t*	mutex)	/*!< in: mutex */
+{
+	ut_a(mutex);
+	ut_a(mutex->magic_n == MUTEX_MAGIC_N);
+
+	return(TRUE);
+}
+
+/******************************************************************//**
+Checks that the current thread owns the mutex. Works only in the debug
+version.
+@return	TRUE if owns */
+UNIV_INTERN
+ibool
+mutex_own(
+/*======*/
+	const mutex_t*	mutex)	/*!< in: mutex */
+{
+	ut_ad(mutex_validate(mutex));
+
+	return(mutex_get_lock_word(mutex) == 1
+	       && os_thread_eq(mutex->thread_id, os_thread_get_curr_id()));
+}
+#endif /* UNIV_DEBUG */
+
+/******************************************************************//**
+Sets the waiters field in a mutex. */
+UNIV_INTERN
+void
+mutex_set_waiters(
+/*==============*/
+	mutex_t*	mutex,	/*!< in: mutex */
+	ulint		n)	/*!< in: value to set */
+{
+	volatile ulint*	ptr;		/* declared volatile to ensure that
+					the value is stored to memory */
+	ut_ad(mutex);
+
+	ptr = &(mutex->waiters);
+
+	*ptr = n;		/* Here we assume that the write of a single
+				word in memory is atomic */
+}
+
+/******************************************************************//**
+Reserves a mutex for the current thread. If the mutex is reserved, the
+function spins a preset time (controlled by SYNC_SPIN_ROUNDS), waiting
+for the mutex before suspending the thread. */
+UNIV_INTERN
+void
+mutex_spin_wait(
+/*============*/
+	mutex_t*	mutex,		/*!< in: pointer to mutex */
+	const char*	file_name,	/*!< in: file name where mutex
+					requested */
+	ulint		line)		/*!< in: line where requested */
+{
+	ulint	   index; /* index of the reserved wait cell */
+	ulint	   i;	  /* spin round count */
+#ifdef UNIV_DEBUG
+	ib_int64_t lstart_time = 0, lfinish_time; /* for timing os_wait */
+	ulint ltime_diff;
+	ulint sec;
+	ulint ms;
+	ulint timer_started = 0;
+#endif /* UNIV_DEBUG */
+	ut_ad(mutex);
+
+	/* This update is not thread safe, but we don't mind if the count
+	isn't exact. Moved out of ifdef that follows because we are willing
+	to sacrifice the cost of counting this as the data is valuable.
+	Count the number of calls to mutex_spin_wait. */
+	mutex_spin_wait_count++;
+
+mutex_loop:
+
+	i = 0;
+
+	/* Spin waiting for the lock word to become zero. Note that we do
+	not have to assume that the read access to the lock word is atomic,
+	as the actual locking is always committed with atomic test-and-set.
+	In reality, however, all processors probably have an atomic read of
+	a memory word. */
+
+spin_loop:
+	ut_d(mutex->count_spin_loop++);
+
+	while (mutex_get_lock_word(mutex) != 0 && i < SYNC_SPIN_ROUNDS) {
+		if (srv_spin_wait_delay) {
+			ut_delay(ut_rnd_interval(0, srv_spin_wait_delay));
+		}
+
+		i++;
+	}
+
+	if (i == SYNC_SPIN_ROUNDS) {
+#ifdef UNIV_DEBUG
+		mutex->count_os_yield++;
+#ifndef UNIV_HOTBACKUP
+		if (timed_mutexes && timer_started == 0) {
+			ut_usectime(&sec, &ms);
+			lstart_time= (ib_int64_t)sec * 1000000 + ms;
+			timer_started = 1;
+		}
+#endif /* UNIV_HOTBACKUP */
+#endif /* UNIV_DEBUG */
+		os_thread_yield();
+	}
+
+#ifdef UNIV_SRV_PRINT_LATCH_WAITS
+	ib_logger(ib_stream,
+		"Thread %lu spin wait mutex at %p"
+		" cfile %s cline %lu rnds %lu\n",
+		(ulong) os_thread_pf(os_thread_get_curr_id()), (void*) mutex,
+		mutex->cfile_name, (ulong) mutex->cline, (ulong) i);
+#endif
+
+	mutex_spin_round_count += i;
+
+	ut_d(mutex->count_spin_rounds += i);
+
+	if (mutex_test_and_set(mutex) == 0) {
+		/* Succeeded! */
+
+		ut_d(mutex->thread_id = os_thread_get_curr_id());
+#ifdef UNIV_SYNC_DEBUG
+		mutex_set_debug_info(mutex, file_name, line);
+#endif
+
+		goto finish_timing;
+	}
+
+	/* We may end up with a situation where lock_word is 0 but the OS
+	fast mutex is still reserved. On FreeBSD the OS does not seem to
+	schedule a thread which is constantly calling pthread_mutex_trylock
+	(in mutex_test_and_set implementation). Then we could end up
+	spinning here indefinitely. The following 'i++' stops this infinite
+	spin. */
+
+	i++;
+
+	if (i < SYNC_SPIN_ROUNDS) {
+		goto spin_loop;
+	}
+
+	sync_array_reserve_cell(sync_primary_wait_array, mutex,
+				SYNC_MUTEX, file_name, line, &index);
+
+	/* The memory order of the array reservation and the change in the
+	waiters field is important: when we suspend a thread, we first
+	reserve the cell and then set waiters field to 1. When threads are
+	released in mutex_exit, the waiters field is first set to zero and
+	then the event is set to the signaled state. */
+
+	mutex_set_waiters(mutex, 1);
+
+	/* Try to reserve still a few times */
+	for (i = 0; i < 4; i++) {
+		if (mutex_test_and_set(mutex) == 0) {
+			/* Succeeded! Free the reserved wait cell */
+
+			sync_array_free_cell(sync_primary_wait_array, index);
+
+			ut_d(mutex->thread_id = os_thread_get_curr_id());
+#ifdef UNIV_SYNC_DEBUG
+			mutex_set_debug_info(mutex, file_name, line);
+#endif
+
+#ifdef UNIV_SRV_PRINT_LATCH_WAITS
+			ib_logger(ib_stream,
+				"Thread %lu spin wait succeeds at 2:"
+				" mutex at %p\n",
+				(ulong) os_thread_pf(os_thread_get_curr_id()),
+				(void*) mutex);
+#endif
+
+			goto finish_timing;
+
+			/* Note that in this case we leave the waiters field
+			set to 1. We cannot reset it to zero, as we do not
+			know if there are other waiters. */
+		}
+	}
+
+	/* Now we know that there has been some thread holding the mutex
+	after the change in the wait array and the waiters field was made.
+	Now there is no risk of infinite wait on the event. */
+
+#ifdef UNIV_SRV_PRINT_LATCH_WAITS
+	ib_logger(ib_stream,
+		"Thread %lu OS wait mutex at %p cfile %s cline %lu rnds %lu\n",
+		(ulong) os_thread_pf(os_thread_get_curr_id()), (void*) mutex,
+		mutex->cfile_name, (ulong) mutex->cline, (ulong) i);
+#endif
+
+	mutex_os_wait_count++;
+
+	mutex->count_os_wait++;
+#ifdef UNIV_DEBUG
+	/* !!!!! Sometimes os_wait can be called without os_thread_yield */
+#ifndef UNIV_HOTBACKUP
+	if (timed_mutexes == 1 && timer_started == 0) {
+		ut_usectime(&sec, &ms);
+		lstart_time= (ib_int64_t)sec * 1000000 + ms;
+		timer_started = 1;
+	}
+#endif /* UNIV_HOTBACKUP */
+#endif /* UNIV_DEBUG */
+
+	sync_array_wait_event(sync_primary_wait_array, index);
+	goto mutex_loop;
+
+finish_timing:
+#ifdef UNIV_DEBUG
+	if (timed_mutexes == 1 && timer_started==1) {
+		ut_usectime(&sec, &ms);
+		lfinish_time= (ib_int64_t)sec * 1000000 + ms;
+
+		ltime_diff= (ulint) (lfinish_time - lstart_time);
+		mutex->lspent_time += ltime_diff;
+
+		if (mutex->lmax_spent_time < ltime_diff) {
+			mutex->lmax_spent_time= ltime_diff;
+		}
+	}
+#endif /* UNIV_DEBUG */
+	return;
+}
+
+/******************************************************************//**
+Releases the threads waiting in the primary wait array for this mutex. */
+UNIV_INTERN
+void
+mutex_signal_object(
+/*================*/
+	mutex_t*	mutex)	/*!< in: mutex */
+{
+	mutex_set_waiters(mutex, 0);
+
+	/* The memory order of resetting the waiters field and
+	signaling the object is important. See LEMMA 1 above. */
+	os_event_set(mutex->event);
+	sync_array_object_signalled(sync_primary_wait_array);
+}
+
+#ifdef UNIV_SYNC_DEBUG
+/******************************************************************//**
+Sets the debug information for a reserved mutex. */
+UNIV_INTERN
+void
+mutex_set_debug_info(
+/*=================*/
+	mutex_t*	mutex,		/*!< in: mutex */
+	const char*	file_name,	/*!< in: file where requested */
+	ulint		line)		/*!< in: line where requested */
+{
+	ut_ad(mutex);
+	ut_ad(file_name);
+
+	sync_thread_add_level(mutex, mutex->level);
+
+	mutex->file_name = file_name;
+	mutex->line	 = line;
+}
+
+/******************************************************************//**
+Gets the debug information for a reserved mutex. */
+UNIV_INTERN
+void
+mutex_get_debug_info(
+/*=================*/
+	mutex_t*	mutex,		/*!< in: mutex */
+	const char**	file_name,	/*!< out: file where requested */
+	ulint*		line,		/*!< out: line where requested */
+	os_thread_id_t* thread_id)	/*!< out: id of the thread which owns
+					the mutex */
+{
+	ut_ad(mutex);
+
+	*file_name = mutex->file_name;
+	*line	   = mutex->line;
+	*thread_id = mutex->thread_id;
+}
+
+/******************************************************************//**
+Prints debug info of currently reserved mutexes. */
+UNIV_STATIC
+void
+mutex_list_print_info(
+/*==================*/
+	ib_stream_t	ib_stream)	/*!< in: stream where to print */
+{
+	mutex_t*	mutex;
+	const char*	file_name;
+	ulint		line;
+	os_thread_id_t	thread_id;
+	ulint		count		= 0;
+
+	ib_logger(ib_stream,
+		"----------\n"
+		"MUTEX INFO\n"
+		"----------\n");
+
+	mutex_enter(&mutex_list_mutex);
+
+	mutex = UT_LIST_GET_FIRST(mutex_list);
+
+	while (mutex != NULL) {
+		count++;
+
+		if (mutex_get_lock_word(mutex) != 0) {
+			mutex_get_debug_info(mutex, &file_name, &line,
+					     &thread_id);
+			ib_logger(ib_stream,
+				"Locked mutex: addr %p thread %ld"
+				" file %s line %ld\n",
+				(void*) mutex, os_thread_pf(thread_id),
+				file_name, line);
+		}
+
+		mutex = UT_LIST_GET_NEXT(list, mutex);
+	}
+
+	ib_logger(ib_stream, "Total number of mutexes %ld\n", count);
+
+	mutex_exit(&mutex_list_mutex);
+}
+
+/******************************************************************//**
+Counts currently reserved mutexes. Works only in the debug version.
+@return	number of reserved mutexes */
+UNIV_INTERN
+ulint
+mutex_n_reserved(void)
+/*==================*/
+{
+	mutex_t*	mutex;
+	ulint		count		= 0;
+
+	mutex_enter(&mutex_list_mutex);
+
+	mutex = UT_LIST_GET_FIRST(mutex_list);
+
+	while (mutex != NULL) {
+		if (mutex_get_lock_word(mutex) != 0) {
+
+			count++;
+		}
+
+		mutex = UT_LIST_GET_NEXT(list, mutex);
+	}
+
+	mutex_exit(&mutex_list_mutex);
+
+	ut_a(count >= 1);
+
+	return(count - 1); /* Subtract one, because this function itself
+			   was holding one mutex (mutex_list_mutex) */
+}
+
+/******************************************************************//**
+Returns TRUE if no mutex or rw-lock is currently locked. Works only in
+the debug version.
+@return	TRUE if no mutexes and rw-locks reserved */
+UNIV_INTERN
+ibool
+sync_all_freed(void)
+/*================*/
+{
+	return(mutex_n_reserved() + rw_lock_n_locked() == 0);
+}
+
+/******************************************************************//**
+Gets the value in the nth slot in the thread level arrays.
+@return	pointer to thread slot */
+UNIV_STATIC
+sync_thread_t*
+sync_thread_level_arrays_get_nth(
+/*=============================*/
+	ulint	n)	/*!< in: slot number */
+{
+	ut_ad(n < OS_THREAD_MAX_N);
+
+	return(sync_thread_level_arrays + n);
+}
+
+/******************************************************************//**
+Looks for the thread slot for the calling thread.
+@return	pointer to thread slot, NULL if not found */
+UNIV_STATIC
+sync_thread_t*
+sync_thread_level_arrays_find_slot(void)
+/*====================================*/
+
+{
+	sync_thread_t*	slot;
+	os_thread_id_t	id;
+	ulint		i;
+
+	id = os_thread_get_curr_id();
+
+	for (i = 0; i < OS_THREAD_MAX_N; i++) {
+
+		slot = sync_thread_level_arrays_get_nth(i);
+
+		if (slot->levels && os_thread_eq(slot->id, id)) {
+
+			return(slot);
+		}
+	}
+
+	return(NULL);
+}
+
+/******************************************************************//**
+Looks for an unused thread slot.
+@return	pointer to thread slot */
+UNIV_STATIC
+sync_thread_t*
+sync_thread_level_arrays_find_free(void)
+/*====================================*/
+
+{
+	sync_thread_t*	slot;
+	ulint		i;
+
+	for (i = 0; i < OS_THREAD_MAX_N; i++) {
+
+		slot = sync_thread_level_arrays_get_nth(i);
+
+		if (slot->levels == NULL) {
+
+			return(slot);
+		}
+	}
+
+	return(NULL);
+}
+
+/******************************************************************//**
+Gets the value in the nth slot in the thread level array.
+@return	pointer to level slot */
+UNIV_STATIC
+sync_level_t*
+sync_thread_levels_get_nth(
+/*=======================*/
+	sync_level_t*	arr,	/*!< in: pointer to level array for an OS
+				thread */
+	ulint		n)	/*!< in: slot number */
+{
+	ut_ad(n < SYNC_THREAD_N_LEVELS);
+
+	return(arr + n);
+}
+
+/******************************************************************//**
+Checks if all the level values stored in the level array are greater than
+the given limit.
+@return	TRUE if all greater */
+UNIV_STATIC
+ibool
+sync_thread_levels_g(
+/*=================*/
+	sync_level_t*	arr,	/*!< in: pointer to level array for an OS
+				thread */
+	ulint		limit,	/*!< in: level limit */
+	ulint		warn)	/*!< in: TRUE=display a diagnostic message */
+{
+	sync_level_t*	slot;
+	rw_lock_t*	lock;
+	mutex_t*	mutex;
+	ulint		i;
+
+	for (i = 0; i < SYNC_THREAD_N_LEVELS; i++) {
+
+		slot = sync_thread_levels_get_nth(arr, i);
+
+		if (slot->latch != NULL) {
+			if (slot->level <= limit) {
+
+				if (!warn) {
+
+					return(FALSE);
+				}
+
+				lock = slot->latch;
+				mutex = slot->latch;
+
+				ib_logger(ib_stream,
+					"InnoDB: sync levels should be"
+					" > %lu but a level is %lu\n",
+					(ulong) limit, (ulong) slot->level);
+
+				if (mutex->magic_n == MUTEX_MAGIC_N) {
+					ib_logger(ib_stream,
+						"Mutex created at %s %lu\n",
+						mutex->cfile_name,
+						(ulong) mutex->cline);
+
+					if (mutex_get_lock_word(mutex) != 0) {
+						const char*	file_name;
+						ulint		line;
+						os_thread_id_t	thread_id;
+
+						mutex_get_debug_info(
+							mutex, &file_name,
+							&line, &thread_id);
+
+						ib_logger(ib_stream,
+							"InnoDB: Locked mutex:"
+							" addr %p thread %ld"
+							" file %s line %ld\n",
+							(void*) mutex,
+							os_thread_pf(
+								thread_id),
+							file_name,
+							(ulong) line);
+					} else {
+						ib_logger(ib_stream,
+							"Not locked\n");
+					}
+				} else {
+					rw_lock_print(lock);
+				}
+
+				return(FALSE);
+			}
+		}
+	}
+
+	return(TRUE);
+}
+
+/******************************************************************//**
+Checks if the level value is stored in the level array.
+@return	TRUE if stored */
+UNIV_STATIC
+ibool
+sync_thread_levels_contain(
+/*=======================*/
+	sync_level_t*	arr,	/*!< in: pointer to level array for an OS
+				thread */
+	ulint		level)	/*!< in: level */
+{
+	sync_level_t*	slot;
+	ulint		i;
+
+	for (i = 0; i < SYNC_THREAD_N_LEVELS; i++) {
+
+		slot = sync_thread_levels_get_nth(arr, i);
+
+		if (slot->latch != NULL) {
+			if (slot->level == level) {
+
+				return(TRUE);
+			}
+		}
+	}
+
+	return(FALSE);
+}
+
+/******************************************************************//**
+Checks if the level array for the current thread contains a
+mutex or rw-latch at the specified level.
+@return	a matching latch, or NULL if not found */
+UNIV_INTERN
+void*
+sync_thread_levels_contains(
+/*========================*/
+	ulint	level)			/*!< in: latching order level
+					(SYNC_DICT, ...)*/
+{
+	sync_level_t*	arr;
+	sync_thread_t*	thread_slot;
+	sync_level_t*	slot;
+	ulint		i;
+
+	if (!sync_order_checks_on) {
+
+		return(NULL);
+	}
+
+	mutex_enter(&sync_thread_mutex);
+
+	thread_slot = sync_thread_level_arrays_find_slot();
+
+	if (thread_slot == NULL) {
+
+		mutex_exit(&sync_thread_mutex);
+
+		return(NULL);
+	}
+
+	arr = thread_slot->levels;
+
+	for (i = 0; i < SYNC_THREAD_N_LEVELS; i++) {
+
+		slot = sync_thread_levels_get_nth(arr, i);
+
+		if (slot->latch != NULL && slot->level == level) {
+
+			mutex_exit(&sync_thread_mutex);
+			return(slot->latch);
+		}
+	}
+
+	mutex_exit(&sync_thread_mutex);
+
+	return(NULL);
+}
+
+/******************************************************************//**
+Checks that the level array for the current thread is empty.
+@return	a latch, or NULL if empty except the exceptions specified below */
+UNIV_INTERN
+void*
+sync_thread_levels_nonempty_gen(
+/*============================*/
+	ibool	dict_mutex_allowed)	/*!< in: TRUE if dictionary mutex is
+					allowed to be owned by the thread,
+					also purge_is_running mutex is
+					allowed */
+{
+	sync_level_t*	arr;
+	sync_thread_t*	thread_slot;
+	sync_level_t*	slot;
+	ulint		i;
+
+	if (!sync_order_checks_on) {
+
+		return(NULL);
+	}
+
+	mutex_enter(&sync_thread_mutex);
+
+	thread_slot = sync_thread_level_arrays_find_slot();
+
+	if (thread_slot == NULL) {
+
+		mutex_exit(&sync_thread_mutex);
+
+		return(NULL);
+	}
+
+	arr = thread_slot->levels;
+
+	for (i = 0; i < SYNC_THREAD_N_LEVELS; i++) {
+
+		slot = sync_thread_levels_get_nth(arr, i);
+
+		if (slot->latch != NULL
+		    && (!dict_mutex_allowed
+			|| (slot->level != SYNC_DICT
+			    && slot->level != SYNC_DICT_OPERATION))) {
+
+			mutex_exit(&sync_thread_mutex);
+			ut_error;
+
+			return(slot->latch);
+		}
+	}
+
+	mutex_exit(&sync_thread_mutex);
+
+	return(NULL);
+}
+
+/******************************************************************//**
+Checks that the level array for the current thread is empty.
+@return	TRUE if empty */
+UNIV_INTERN
+ibool
+sync_thread_levels_empty(void)
+/*==========================*/
+{
+	return(sync_thread_levels_empty_gen(FALSE));
+}
+
+/******************************************************************//**
+Adds a latch and its level in the thread level array. Allocates the memory
+for the array if called first time for this OS thread. Makes the checks
+against other latch levels stored in the array for this thread. */
+UNIV_INTERN
+void
+sync_thread_add_level(
+/*==================*/
+	void*	latch,	/*!< in: pointer to a mutex or an rw-lock */
+	ulint	level)	/*!< in: level in the latching order; if
+			SYNC_LEVEL_VARYING, nothing is done */
+{
+	sync_level_t*	array;
+	sync_level_t*	slot;
+	sync_thread_t*	thread_slot;
+	ulint		i;
+
+	if (!sync_order_checks_on) {
+
+		return;
+	}
+
+	if ((latch == (void*)&sync_thread_mutex)
+	    || (latch == (void*)&mutex_list_mutex)
+	    || (latch == (void*)&rw_lock_debug_mutex)
+	    || (latch == (void*)&rw_lock_list_mutex)) {
+
+		return;
+	}
+
+	if (level == SYNC_LEVEL_VARYING) {
+
+		return;
+	}
+
+	mutex_enter(&sync_thread_mutex);
+
+	thread_slot = sync_thread_level_arrays_find_slot();
+
+	if (thread_slot == NULL) {
+		/* We have to allocate the level array for a new thread */
+		array = ut_malloc(sizeof(sync_level_t) * SYNC_THREAD_N_LEVELS);
+
+		thread_slot = sync_thread_level_arrays_find_free();
+
+		thread_slot->id = os_thread_get_curr_id();
+		thread_slot->levels = array;
+
+		for (i = 0; i < SYNC_THREAD_N_LEVELS; i++) {
+
+			slot = sync_thread_levels_get_nth(array, i);
+
+			slot->latch = NULL;
+		}
+	}
+
+	array = thread_slot->levels;
+
+	/* NOTE that there is a problem with _NODE and _LEAF levels: if the
+	B-tree height changes, then a leaf can change to an internal node
+	or the other way around. We do not know at present if this can cause
+	unnecessary assertion failures below. */
+
+	switch (level) {
+	case SYNC_NO_ORDER_CHECK:
+	case SYNC_EXTERN_STORAGE:
+	case SYNC_TREE_NODE_FROM_HASH:
+		/* Do no order checking */
+		break;
+	case SYNC_MEM_POOL:
+	case SYNC_MEM_HASH:
+	case SYNC_RECV:
+	case SYNC_WORK_QUEUE:
+	case SYNC_LOG:
+	case SYNC_THR_LOCAL:
+	case SYNC_ANY_LATCH:
+	case SYNC_TRX_SYS_HEADER:
+	case SYNC_FILE_FORMAT_TAG:
+	case SYNC_DOUBLEWRITE:
+	case SYNC_BUF_POOL:
+	case SYNC_SEARCH_SYS:
+	case SYNC_SEARCH_SYS_CONF:
+	case SYNC_TRX_LOCK_HEAP:
+	case SYNC_KERNEL:
+	case SYNC_IBUF_BITMAP_MUTEX:
+	case SYNC_RSEG:
+	case SYNC_TRX_UNDO:
+	case SYNC_PURGE_LATCH:
+	case SYNC_PURGE_SYS:
+	case SYNC_DICT_AUTOINC_MUTEX:
+	case SYNC_DICT_OPERATION:
+	case SYNC_DICT_HEADER:
+	case SYNC_TRX_I_S_RWLOCK:
+	case SYNC_TRX_I_S_LAST_READ:
+		if (!sync_thread_levels_g(array, level, TRUE)) {
+			ib_logger(ib_stream,
+				"InnoDB: sync_thread_levels_g(array, %lu)"
+				" does not hold!\n", level);
+			ut_error;
+		}
+		break;
+	case SYNC_BUF_BLOCK:
+		/* Either the thread must own the buffer pool mutex
+		(buf_pool_mutex), or it is allowed to latch only ONE
+		buffer block (block->mutex or buf_pool_zip_mutex). */
+		if (!sync_thread_levels_g(array, level, FALSE)) {
+			ut_a(sync_thread_levels_g(array, level - 1, TRUE));
+			ut_a(sync_thread_levels_contain(array, SYNC_BUF_POOL));
+		}
+		break;
+	case SYNC_REC_LOCK:
+		if (sync_thread_levels_contain(array, SYNC_KERNEL)) {
+			ut_a(sync_thread_levels_g(array, SYNC_REC_LOCK - 1,
+						  TRUE));
+		} else {
+			ut_a(sync_thread_levels_g(array, SYNC_REC_LOCK, TRUE));
+		}
+		break;
+	case SYNC_IBUF_BITMAP:
+		/* Either the thread must own the master mutex to all
+		the bitmap pages, or it is allowed to latch only ONE
+		bitmap page. */
+		if (sync_thread_levels_contain(array,
+					       SYNC_IBUF_BITMAP_MUTEX)) {
+			ut_a(sync_thread_levels_g(array, SYNC_IBUF_BITMAP - 1,
+						  TRUE));
+		} else {
+			ut_a(sync_thread_levels_g(array, SYNC_IBUF_BITMAP,
+						  TRUE));
+		}
+		break;
+	case SYNC_FSP_PAGE:
+		ut_a(sync_thread_levels_contain(array, SYNC_FSP));
+		break;
+	case SYNC_FSP:
+		ut_a(sync_thread_levels_contain(array, SYNC_FSP)
+		     || sync_thread_levels_g(array, SYNC_FSP, TRUE));
+		break;
+	case SYNC_TRX_UNDO_PAGE:
+		ut_a(sync_thread_levels_contain(array, SYNC_TRX_UNDO)
+		     || sync_thread_levels_contain(array, SYNC_RSEG)
+		     || sync_thread_levels_contain(array, SYNC_PURGE_SYS)
+		     || sync_thread_levels_g(array, SYNC_TRX_UNDO_PAGE, TRUE));
+		break;
+	case SYNC_RSEG_HEADER:
+		ut_a(sync_thread_levels_contain(array, SYNC_RSEG));
+		break;
+	case SYNC_RSEG_HEADER_NEW:
+		ut_a(sync_thread_levels_contain(array, SYNC_KERNEL)
+		     && sync_thread_levels_contain(array, SYNC_FSP_PAGE));
+		break;
+	case SYNC_TREE_NODE:
+		ut_a(sync_thread_levels_contain(array, SYNC_INDEX_TREE)
+		     || sync_thread_levels_contain(array, SYNC_DICT_OPERATION)
+		     || sync_thread_levels_g(array, SYNC_TREE_NODE - 1, TRUE));
+		break;
+	case SYNC_TREE_NODE_NEW:
+		ut_a(sync_thread_levels_contain(array, SYNC_FSP_PAGE)
+		     || sync_thread_levels_contain(array, SYNC_IBUF_MUTEX));
+		break;
+	case SYNC_INDEX_TREE:
+		if (sync_thread_levels_contain(array, SYNC_IBUF_MUTEX)
+		    && sync_thread_levels_contain(array, SYNC_FSP)) {
+			ut_a(sync_thread_levels_g(array, SYNC_FSP_PAGE - 1,
+						  TRUE));
+		} else {
+			ut_a(sync_thread_levels_g(array, SYNC_TREE_NODE - 1,
+						  TRUE));
+		}
+		break;
+	case SYNC_IBUF_MUTEX:
+		ut_a(sync_thread_levels_g(array, SYNC_FSP_PAGE - 1, TRUE));
+		break;
+	case SYNC_IBUF_PESS_INSERT_MUTEX:
+		ut_a(sync_thread_levels_g(array, SYNC_FSP - 1, TRUE));
+		ut_a(!sync_thread_levels_contain(array, SYNC_IBUF_MUTEX));
+		break;
+	case SYNC_IBUF_HEADER:
+		ut_a(sync_thread_levels_g(array, SYNC_FSP - 1, TRUE));
+		ut_a(!sync_thread_levels_contain(array, SYNC_IBUF_MUTEX));
+		ut_a(!sync_thread_levels_contain(array,
+						 SYNC_IBUF_PESS_INSERT_MUTEX));
+		break;
+	case SYNC_DICT:
+#ifdef UNIV_DEBUG
+		ut_a(buf_debug_prints
+		     || sync_thread_levels_g(array, SYNC_DICT, TRUE));
+#else /* UNIV_DEBUG */
+		ut_a(sync_thread_levels_g(array, SYNC_DICT, TRUE));
+#endif /* UNIV_DEBUG */
+		break;
+	default:
+		ut_error;
+	}
+
+	for (i = 0; i < SYNC_THREAD_N_LEVELS; i++) {
+
+		slot = sync_thread_levels_get_nth(array, i);
+
+		if (slot->latch == NULL) {
+			slot->latch = latch;
+			slot->level = level;
+
+			break;
+		}
+	}
+
+	ut_a(i < SYNC_THREAD_N_LEVELS);
+
+	mutex_exit(&sync_thread_mutex);
+}
+
+/******************************************************************//**
+Removes a latch from the thread level array if it is found there.
+@return TRUE if found in the array; it is no error if the latch is
+not found, as we presently are not able to determine the level for
+every latch reservation the program does */
+UNIV_INTERN
+ibool
+sync_thread_reset_level(
+/*====================*/
+	void*	latch)	/*!< in: pointer to a mutex or an rw-lock */
+{
+	sync_level_t*	array;
+	sync_level_t*	slot;
+	sync_thread_t*	thread_slot;
+	ulint		i;
+
+	if (!sync_order_checks_on) {
+
+		return(FALSE);
+	}
+
+	if ((latch == (void*)&sync_thread_mutex)
+	    || (latch == (void*)&mutex_list_mutex)
+	    || (latch == (void*)&rw_lock_debug_mutex)
+	    || (latch == (void*)&rw_lock_list_mutex)) {
+
+		return(FALSE);
+	}
+
+	mutex_enter(&sync_thread_mutex);
+
+	thread_slot = sync_thread_level_arrays_find_slot();
+
+	if (thread_slot == NULL) {
+
+		ut_error;
+
+		mutex_exit(&sync_thread_mutex);
+		return(FALSE);
+	}
+
+	array = thread_slot->levels;
+
+	for (i = 0; i < SYNC_THREAD_N_LEVELS; i++) {
+
+		slot = sync_thread_levels_get_nth(array, i);
+
+		if (slot->latch == latch) {
+			slot->latch = NULL;
+
+			mutex_exit(&sync_thread_mutex);
+
+			return(TRUE);
+		}
+	}
+
+	if (((mutex_t*) latch)->magic_n != MUTEX_MAGIC_N) {
+		rw_lock_t*	rw_lock;
+
+		rw_lock = (rw_lock_t*) latch;
+
+		if (rw_lock->level == SYNC_LEVEL_VARYING) {
+			mutex_exit(&sync_thread_mutex);
+
+			return(TRUE);
+		}
+	}
+
+	ut_error;
+
+	mutex_exit(&sync_thread_mutex);
+
+	return(FALSE);
+}
+#endif /* UNIV_SYNC_DEBUG */
+
+/******************************************************************//**
+Initializes the synchronization data structures. */
+UNIV_INTERN
+void
+sync_init(void)
+/*===========*/
+{
+#ifdef UNIV_SYNC_DEBUG
+	sync_thread_t*	thread_slot;
+	ulint		i;
+#endif /* UNIV_SYNC_DEBUG */
+
+	ut_a(sync_initialized == FALSE);
+
+	sync_initialized = TRUE;
+
+	/* Create the primary system wait array which is protected by an OS
+	mutex */
+
+	sync_primary_wait_array = sync_array_create(OS_THREAD_MAX_N,
+						    SYNC_ARRAY_OS_MUTEX);
+#ifdef UNIV_SYNC_DEBUG
+	/* Create the thread latch level array where the latch levels
+	are stored for each OS thread */
+
+	sync_thread_level_arrays = ut_malloc(OS_THREAD_MAX_N
+					     * sizeof(sync_thread_t));
+	for (i = 0; i < OS_THREAD_MAX_N; i++) {
+
+		thread_slot = sync_thread_level_arrays_get_nth(i);
+		thread_slot->levels = NULL;
+	}
+#endif /* UNIV_SYNC_DEBUG */
+	/* Init the mutex list and create the mutex to protect it. */
+
+	UT_LIST_INIT(mutex_list);
+	mutex_create(&mutex_list_mutex, SYNC_NO_ORDER_CHECK);
+#ifdef UNIV_SYNC_DEBUG
+	mutex_create(&sync_thread_mutex, SYNC_NO_ORDER_CHECK);
+#endif /* UNIV_SYNC_DEBUG */
+
+	/* Init the rw-lock list and create the mutex to protect it. */
+
+	UT_LIST_INIT(rw_lock_list);
+	mutex_create(&rw_lock_list_mutex, SYNC_NO_ORDER_CHECK);
+
+#ifdef UNIV_SYNC_DEBUG
+	mutex_create(&rw_lock_debug_mutex, SYNC_NO_ORDER_CHECK);
+
+	rw_lock_debug_event = os_event_create(NULL);
+	rw_lock_debug_waiters = FALSE;
+#endif /* UNIV_SYNC_DEBUG */
+}
+
+/******************************************************************//**
+Frees the resources in InnoDB's own synchronization data structures. Use
+os_sync_free() after calling this. */
+UNIV_INTERN
+void
+sync_close(void)
+/*===========*/
+{
+	mutex_t*	mutex;
+
+	sync_array_free(sync_primary_wait_array);
+
+	mutex = UT_LIST_GET_FIRST(mutex_list);
+
+	while (mutex) {
+#ifdef UNIV_MEM_DEBUG
+		if (mutex == &mem_hash_mutex) {
+			mutex = UT_LIST_GET_NEXT(list, mutex);
+			continue;
+		}
+#endif /* UNIV_MEM_DEBUG */
+		mutex_free(mutex);
+		mutex = UT_LIST_GET_FIRST(mutex_list);
+	}
+
+	mutex_free(&mutex_list_mutex);
+#ifdef UNIV_SYNC_DEBUG
+	mutex_free(&sync_thread_mutex);
+	sync_order_checks_on = FALSE;
+
+	/* Switch latching order checks on in sync0sync.c */
+	sync_order_checks_on = FALSE;
+#endif /* UNIV_SYNC_DEBUG */
+	sync_initialized = FALSE;
+}
+
+/*******************************************************************//**
+Prints wait info of the sync system. */
+UNIV_INTERN
+void
+sync_print_wait_info(
+/*=================*/
+	ib_stream_t	ib_stream)	/*!< in: stream where to print */
+{
+#ifdef UNIV_SYNC_DEBUG
+	ib_logger(ib_stream,
+		"Mutex exits %llu, rws exits %llu, rwx exits %llu\n",
+		mutex_exit_count, rw_s_exit_count, rw_x_exit_count);
+#endif
+
+	ib_logger(ib_stream,
+		"Mutex spin waits %llu, rounds %llu, OS waits %llu\n"
+		"RW-shared spins %llu, OS waits %llu;"
+		" RW-excl spins %llu, OS waits %llu\n",
+		mutex_spin_wait_count,
+		mutex_spin_round_count,
+		mutex_os_wait_count,
+		rw_s_spin_wait_count,
+		rw_s_os_wait_count,
+		rw_x_spin_wait_count,
+		rw_x_os_wait_count);
+
+	ib_logger(ib_stream,
+		"Spin rounds per wait: %.2f mutex, %.2f RW-shared, "
+		"%.2f RW-excl\n",
+		(double) mutex_spin_round_count /
+		(mutex_spin_wait_count ? mutex_spin_wait_count : 1),
+		(double) rw_s_spin_round_count /
+		(rw_s_spin_wait_count ? rw_s_spin_wait_count : 1),
+		(double) rw_x_spin_round_count /
+		(rw_x_spin_wait_count ? rw_x_spin_wait_count : 1));
+}
+
+/*******************************************************************//**
+Prints info of the sync system. */
+UNIV_INTERN
+void
+sync_print(
+/*=======*/
+	ib_stream_t	ib_stream)	/*!< in: stream where to print */
+{
+#ifdef UNIV_SYNC_DEBUG
+	mutex_list_print_info(ib_stream);
+
+	rw_lock_list_print_info(ib_stream);
+#endif /* UNIV_SYNC_DEBUG */
+
+	sync_array_print_info(ib_stream, sync_primary_wait_array);
+
+	sync_print_wait_info(ib_stream);
+}
+/*****************************************************************************
+
+Copyright (c) 1995, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file thr/thr0loc.c
+The thread local storage
+
+Created 10/5/1995 Heikki Tuuri
+*******************************************************/
+
+#include "thr0loc.h"
+#ifdef UNIV_NONINL
+#include "thr0loc.ic"
+#endif
+
+#include "sync0sync.h"
+#include "hash0hash.h"
+#include "mem0mem.h"
+#include "srv0srv.h"
+
+/*
+	IMPLEMENTATION OF THREAD LOCAL STORAGE
+	======================================
+
+The threads sometimes need private data which depends on the thread id.
+This is implemented as a hash table, where the hash value is calculated
+from the thread id, to prepare for a large number of threads. The hash table
+is protected by a mutex. If you need modify the program and put new data to
+the thread local storage, just add it to struct thr_local_struct in the
+header file. */
+
+/** Mutex protecting thr_local_hash */
+UNIV_STATIC mutex_t		thr_local_mutex;
+
+/** The hash table. The module is not yet initialized when it is NULL. */
+UNIV_STATIC hash_table_t*	thr_local_hash	= NULL;
+
+/** Thread local data */
+typedef struct thr_local_struct thr_local_t;
+
+/** @brief Thread local data.
+The private data for each thread should be put to
+the structure below and the accessor functions written
+for the field. */
+struct thr_local_struct{
+	os_thread_id_t	id;	/*!< id of the thread which owns this struct */
+	os_thread_t	handle;	/*!< operating system handle to the thread */
+	ulint		slot_no;/*!< the index of the slot in the thread table
+				for this thread */
+	ibool		in_ibuf;/*!< TRUE if the thread is doing an ibuf
+				operation */
+	hash_node_t	hash;	/*!< hash chain node */
+	ulint		magic_n;/*!< magic number (THR_LOCAL_MAGIC_N) */
+};
+
+/** The value of thr_local_struct::magic_n */
+#define THR_LOCAL_MAGIC_N	1231234
+
+/*******************************************************************//**
+Returns the local storage struct for a thread.
+@return	local storage */
+UNIV_STATIC
+thr_local_t*
+thr_local_get(
+/*==========*/
+	os_thread_id_t	id)	/*!< in: thread id of the thread */
+{
+	thr_local_t*	local;
+
+try_again:
+	ut_ad(thr_local_hash);
+	ut_ad(mutex_own(&thr_local_mutex));
+
+	/* Look for the local struct in the hash table */
+
+	local = NULL;
+
+	HASH_SEARCH(hash, thr_local_hash, os_thread_pf(id),
+		    thr_local_t*, local,, os_thread_eq(local->id, id));
+	if (local == NULL) {
+		mutex_exit(&thr_local_mutex);
+
+		thr_local_create();
+
+		mutex_enter(&thr_local_mutex);
+
+		goto try_again;
+	}
+
+	ut_ad(local->magic_n == THR_LOCAL_MAGIC_N);
+
+	return(local);
+}
+
+/*******************************************************************//**
+Gets the slot number in the thread table of a thread.
+@return	slot number */
+UNIV_INTERN
+ulint
+thr_local_get_slot_no(
+/*==================*/
+	os_thread_id_t	id)	/*!< in: thread id of the thread */
+{
+	ulint		slot_no;
+	thr_local_t*	local;
+
+	mutex_enter(&thr_local_mutex);
+
+	local = thr_local_get(id);
+
+	slot_no = local->slot_no;
+
+	mutex_exit(&thr_local_mutex);
+
+	return(slot_no);
+}
+
+/*******************************************************************//**
+Sets the slot number in the thread table of a thread. */
+UNIV_INTERN
+void
+thr_local_set_slot_no(
+/*==================*/
+	os_thread_id_t	id,	/*!< in: thread id of the thread */
+	ulint		slot_no)/*!< in: slot number */
+{
+	thr_local_t*	local;
+
+	mutex_enter(&thr_local_mutex);
+
+	local = thr_local_get(id);
+
+	local->slot_no = slot_no;
+
+	mutex_exit(&thr_local_mutex);
+}
+
+/*******************************************************************//**
+Returns pointer to the 'in_ibuf' field within the current thread local
+storage.
+@return	pointer to the in_ibuf field */
+UNIV_INTERN
+ibool*
+thr_local_get_in_ibuf_field(void)
+/*=============================*/
+{
+	thr_local_t*	local;
+
+	mutex_enter(&thr_local_mutex);
+
+	local = thr_local_get(os_thread_get_curr_id());
+
+	mutex_exit(&thr_local_mutex);
+
+	return(&(local->in_ibuf));
+}
+
+/*******************************************************************//**
+Creates a local storage struct for the calling new thread. */
+UNIV_INTERN
+void
+thr_local_create(void)
+/*==================*/
+{
+	thr_local_t*	local;
+
+	if (thr_local_hash == NULL) {
+		thr_local_init();
+	}
+
+	local = mem_alloc(sizeof(thr_local_t));
+
+	local->id = os_thread_get_curr_id();
+	local->handle = os_thread_get_curr();
+	local->magic_n = THR_LOCAL_MAGIC_N;
+
+	local->in_ibuf = FALSE;
+
+	mutex_enter(&thr_local_mutex);
+
+	HASH_INSERT(thr_local_t, hash, thr_local_hash,
+		    os_thread_pf(os_thread_get_curr_id()),
+		    local);
+
+	mutex_exit(&thr_local_mutex);
+}
+
+/*******************************************************************//**
+Frees the local storage struct for the specified thread. */
+UNIV_INTERN
+void
+thr_local_free(
+/*===========*/
+	os_thread_id_t	id)	/*!< in: thread id */
+{
+	thr_local_t*	local;
+
+	mutex_enter(&thr_local_mutex);
+
+	/* Look for the local struct in the hash table */
+
+	HASH_SEARCH(hash, thr_local_hash, os_thread_pf(id),
+		    thr_local_t*, local,, os_thread_eq(local->id, id));
+	if (local == NULL) {
+		mutex_exit(&thr_local_mutex);
+
+		return;
+	}
+
+	HASH_DELETE(thr_local_t, hash, thr_local_hash,
+		    os_thread_pf(id), local);
+
+	mutex_exit(&thr_local_mutex);
+
+	ut_a(local->magic_n == THR_LOCAL_MAGIC_N);
+
+	mem_free(local);
+}
+
+/****************************************************************//**
+Initializes the thread local storage module. */
+UNIV_INTERN
+void
+thr_local_init(void)
+/*================*/
+{
+	ut_a(thr_local_hash == NULL);
+
+	thr_local_hash = hash_create(OS_THREAD_MAX_N + 100);
+
+	mutex_create(&thr_local_mutex, SYNC_THR_LOCAL);
+}
+
+/********************************************************************
+Close the thread local storage module. */
+UNIV_INTERN
+void
+thr_local_close(void)
+/*=================*/
+{
+	ulint		i;
+
+	ut_a(thr_local_hash != NULL);
+
+	/* Free the hash elements. We don't remove them from the table
+	because we are going to destroy the table anyway. */
+	for (i = 0; i < hash_get_n_cells(thr_local_hash); i++) {
+		thr_local_t*	local;
+
+		local = HASH_GET_FIRST(thr_local_hash, i);
+
+		while (local) {
+			thr_local_t*	prev_local = local;
+
+			local = HASH_GET_NEXT(hash, prev_local);
+			ut_a(prev_local->magic_n == THR_LOCAL_MAGIC_N);
+			mem_free(prev_local);
+		}
+	}
+
+	hash_table_free(thr_local_hash);
+	thr_local_hash = NULL;
+}

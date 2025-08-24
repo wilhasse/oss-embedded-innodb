@@ -1,0 +1,4529 @@
+==================================================================
+COMPONENT: ADAPTIVE HASH INDEX
+==================================================================
+The adaptive hash index automatically creates hash indexes
+for frequently accessed pages to speed up lookups.
+
+Key concepts:
+- Hash table structure
+- Automatic index creation
+- Hash index maintenance
+- Performance monitoring
+
+Files included:
+/*****************************************************************************
+
+Copyright (c) 1994, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/ha0ha.h
+The hash table with external chains
+
+Created 8/18/1994 Heikki Tuuri
+*******************************************************/
+
+#ifndef ha0ha_h
+#define ha0ha_h
+
+#include "univ.i"
+
+#include "hash0hash.h"
+#include "page0types.h"
+#include "buf0types.h"
+
+/*************************************************************//**
+Looks for an element in a hash table.
+@return pointer to the data of the first hash table node in chain
+having the fold number, NULL if not found */
+UNIV_INLINE
+void*
+ha_search_and_get_data(
+/*===================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold);	/*!< in: folded value of the searched data */
+/*********************************************************//**
+Looks for an element when we know the pointer to the data and updates
+the pointer to data if found. */
+UNIV_INTERN
+void
+ha_search_and_update_if_found_func(
+/*===============================*/
+	hash_table_t*	table,	/*!< in/out: hash table */
+	ulint		fold,	/*!< in: folded value of the searched data */
+	void*		data,	/*!< in: pointer to the data */
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	buf_block_t*	new_block,/*!< in: block containing new_data */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	void*		new_data);/*!< in: new pointer to the data */
+
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+/** Looks for an element when we know the pointer to the data and
+updates the pointer to data if found.
+@param table		in/out: hash table
+@param fold		in: folded value of the searched data
+@param data		in: pointer to the data
+@param new_block	in: block containing new_data
+@param new_data		in: new pointer to the data */
+# define ha_search_and_update_if_found(table,fold,data,new_block,new_data) \
+	ha_search_and_update_if_found_func(table,fold,data,new_block,new_data)
+#else /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+/** Looks for an element when we know the pointer to the data and
+updates the pointer to data if found.
+@param table		in/out: hash table
+@param fold		in: folded value of the searched data
+@param data		in: pointer to the data
+@param new_block	ignored: block containing new_data
+@param new_data		in: new pointer to the data */
+# define ha_search_and_update_if_found(table,fold,data,new_block,new_data) \
+	ha_search_and_update_if_found_func(table,fold,data,new_data)
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+/*************************************************************//**
+Creates a hash table with at least n array cells.  The actual number
+of cells is chosen to be a prime number slightly bigger than n.
+@return	own: created table */
+UNIV_INTERN
+hash_table_t*
+ha_create_func(
+/*===========*/
+	ulint	n,		/*!< in: number of array cells */
+#ifdef UNIV_SYNC_DEBUG
+	ulint	mutex_level,	/*!< in: level of the mutexes in the latching
+				order: this is used in the debug version */
+#endif /* UNIV_SYNC_DEBUG */
+	ulint	n_mutexes);	/*!< in: number of mutexes to protect the
+				hash table: must be a power of 2, or 0 */
+#ifdef UNIV_SYNC_DEBUG
+/** Creates a hash table.
+@return		own: created table
+@param n_c	in: number of array cells.  The actual number of cells is
+chosen to be a slightly bigger prime number.
+@param level	in: level of the mutexes in the latching order
+@param n_m	in: number of mutexes to protect the hash table;
+		must be a power of 2, or 0 */
+# define ha_create(n_c,n_m,level) ha_create_func(n_c,level,n_m)
+#else /* UNIV_SYNC_DEBUG */
+/** Creates a hash table.
+@return		own: created table
+@param n_c	in: number of array cells.  The actual number of cells is
+chosen to be a slightly bigger prime number.
+@param level	in: level of the mutexes in the latching order
+@param n_m	in: number of mutexes to protect the hash table;
+		must be a power of 2, or 0 */
+# define ha_create(n_c,n_m,level) ha_create_func(n_c,n_m)
+#endif /* UNIV_SYNC_DEBUG */
+
+/*************************************************************//**
+Empties a hash table and frees the memory heaps. */
+UNIV_INTERN
+void
+ha_clear(
+/*=====*/
+	hash_table_t*	table);	/*!< in, own: hash table */
+
+/*************************************************************//**
+Inserts an entry into a hash table. If an entry with the same fold number
+is found, its node is updated to point to the new data, and no new node
+is inserted.
+@return	TRUE if succeed, FALSE if no more memory could be allocated */
+UNIV_INTERN
+ibool
+ha_insert_for_fold_func(
+/*====================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold,	/*!< in: folded value of data; if a node with
+				the same fold value already exists, it is
+				updated to point to the same data, and no new
+				node is created! */
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	buf_block_t*	block,	/*!< in: buffer block containing the data */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	void*		data);	/*!< in: data, must not be NULL */
+
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+/**
+Inserts an entry into a hash table. If an entry with the same fold number
+is found, its node is updated to point to the new data, and no new node
+is inserted.
+@return	TRUE if succeed, FALSE if no more memory could be allocated
+@param t	in: hash table
+@param f	in: folded value of data
+@param b	in: buffer block containing the data
+@param d	in: data, must not be NULL */
+# define ha_insert_for_fold(t,f,b,d) ha_insert_for_fold_func(t,f,b,d)
+#else /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+/**
+Inserts an entry into a hash table. If an entry with the same fold number
+is found, its node is updated to point to the new data, and no new node
+is inserted.
+@return	TRUE if succeed, FALSE if no more memory could be allocated
+@param t	in: hash table
+@param f	in: folded value of data
+@param b	ignored: buffer block containing the data
+@param d	in: data, must not be NULL */
+# define ha_insert_for_fold(t,f,b,d) ha_insert_for_fold_func(t,f,d)
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+
+/*********************************************************//**
+Looks for an element when we know the pointer to the data and deletes
+it from the hash table if found.
+@return	TRUE if found */
+UNIV_INLINE
+ibool
+ha_search_and_delete_if_found(
+/*==========================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold,	/*!< in: folded value of the searched data */
+	void*		data);	/*!< in: pointer to the data */
+#ifndef UNIV_HOTBACKUP
+/*****************************************************************//**
+Removes from the chain determined by fold all nodes whose data pointer
+points to the page given. */
+UNIV_INTERN
+void
+ha_remove_all_nodes_to_page(
+/*========================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold,	/*!< in: fold value */
+	const page_t*	page);	/*!< in: buffer page */
+/*************************************************************//**
+Validates a given range of the cells in hash table.
+@return	TRUE if ok */
+UNIV_INTERN
+ibool
+ha_validate(
+/*========*/
+	hash_table_t*	table,		/*!< in: hash table */
+	ulint		start_index,	/*!< in: start index */
+	ulint		end_index);	/*!< in: end index */
+/*************************************************************//**
+Prints info of a hash table. */
+UNIV_INTERN
+void
+ha_print_info(
+/*==========*/
+	ib_stream_t	ib_stream,	/*!< in: stream where to print */
+	hash_table_t*	table);		/*!< in: hash table */
+#endif /* !UNIV_HOTBACKUP */
+
+/** The hash table external chain node */
+typedef struct ha_node_struct ha_node_t;
+
+/** The hash table external chain node */
+struct ha_node_struct {
+	ha_node_t*	next;	/*!< next chain node or NULL if none */
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	buf_block_t*	block;	/*!< buffer block containing the data, or NULL */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	void*		data;	/*!< pointer to the data */
+	ulint		fold;	/*!< fold value for the data */
+};
+
+#ifndef UNIV_HOTBACKUP
+/** Assert that the current thread is holding the mutex protecting a
+hash bucket corresponding to a fold value.
+@param table	in: hash table
+@param fold	in: fold value */
+# define ASSERT_HASH_MUTEX_OWN(table, fold)				\
+	ut_ad(!(table)->mutexes || mutex_own(hash_get_mutex(table, fold)))
+#else /* !UNIV_HOTBACKUP */
+/** Assert that the current thread is holding the mutex protecting a
+hash bucket corresponding to a fold value.
+@param table	in: hash table
+@param fold	in: fold value */
+# define ASSERT_HASH_MUTEX_OWN(table, fold) ((void) 0)
+#endif /* !UNIV_HOTBACKUP */
+
+#ifndef UNIV_NONINL
+#include "ha0ha.ic"
+#endif
+
+#endif
+/*****************************************************************************
+
+Copyright (c) 2007, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/ha0storage.h
+Hash storage.
+Provides a data structure that stores chunks of data in
+its own storage, avoiding duplicates.
+
+Created September 22, 2007 Vasil Dimov
+*******************************************************/
+
+#ifndef ha0storage_h
+#define ha0storage_h
+
+#include "univ.i"
+
+/** This value is used by default by ha_storage_create(). More memory
+is allocated later when/if it is needed. */
+#define HA_STORAGE_DEFAULT_HEAP_BYTES	1024
+
+/** This value is used by default by ha_storage_create(). It is a
+constant per ha_storage's lifetime. */
+#define HA_STORAGE_DEFAULT_HASH_CELLS	4096
+
+/** Hash storage */
+typedef struct ha_storage_struct	ha_storage_t;
+
+/*******************************************************************//**
+Creates a hash storage. If any of the parameters is 0, then a default
+value is used.
+@return	own: hash storage */
+UNIV_INLINE
+ha_storage_t*
+ha_storage_create(
+/*==============*/
+	ulint	initial_heap_bytes,	/*!< in: initial heap's size */
+	ulint	initial_hash_cells);	/*!< in: initial number of cells
+					in the hash table */
+
+/*******************************************************************//**
+Copies data into the storage and returns a pointer to the copy. If the
+same data chunk is already present, then pointer to it is returned.
+Data chunks are considered to be equal if len1 == len2 and
+memcmp(data1, data2, len1) == 0. If "data" is not present (and thus
+data_len bytes need to be allocated) and the size of storage is going to
+become more than "memlim" then "data" is not added and NULL is returned.
+To disable this behavior "memlim" can be set to 0, which stands for
+"no limit".
+@return	pointer to the copy */
+UNIV_INTERN
+const void*
+ha_storage_put_memlim(
+/*==================*/
+	ha_storage_t*	storage,	/*!< in/out: hash storage */
+	const void*	data,		/*!< in: data to store */
+	ulint		data_len,	/*!< in: data length */
+	ulint		memlim);	/*!< in: memory limit to obey */
+
+/*******************************************************************//**
+Same as ha_storage_put_memlim() but without memory limit.
+@param storage	in/out: hash storage
+@param data	in: data to store
+@param data_len	in: data length
+@return		pointer to the copy of the string */
+#define ha_storage_put(storage, data, data_len)	\
+	ha_storage_put_memlim((storage), (data), (data_len), 0)
+
+/*******************************************************************//**
+Copies string into the storage and returns a pointer to the copy. If the
+same string is already present, then pointer to it is returned.
+Strings are considered to be equal if strcmp(str1, str2) == 0.
+@param storage	in/out: hash storage
+@param str	in: string to put
+@return		pointer to the copy of the string */
+#define ha_storage_put_str(storage, str)	\
+	((const char*) ha_storage_put((storage), (str), strlen(str) + 1))
+
+/*******************************************************************//**
+Copies string into the storage and returns a pointer to the copy obeying
+a memory limit.
+If the same string is already present, then pointer to it is returned.
+Strings are considered to be equal if strcmp(str1, str2) == 0.
+@param storage	in/out: hash storage
+@param str	in: string to put
+@param memlim	in: memory limit to obey
+@return		pointer to the copy of the string */
+#define ha_storage_put_str_memlim(storage, str, memlim)	\
+	((const char*) ha_storage_put_memlim((storage), (str),	\
+					     strlen(str) + 1, (memlim)))
+
+/*******************************************************************//**
+Empties a hash storage, freeing memory occupied by data chunks.
+This invalidates any pointers previously returned by ha_storage_put().
+The hash storage is not invalidated itself and can be used again. */
+UNIV_INLINE
+void
+ha_storage_empty(
+/*=============*/
+	ha_storage_t**	storage);	/*!< in/out: hash storage */
+
+/*******************************************************************//**
+Frees a hash storage and everything it contains, it cannot be used after
+this call.
+This invalidates any pointers previously returned by ha_storage_put(). */
+UNIV_INLINE
+void
+ha_storage_free(
+/*============*/
+	ha_storage_t*	storage);	/*!< in, own: hash storage */
+
+/*******************************************************************//**
+Gets the size of the memory used by a storage.
+@return	bytes used */
+UNIV_INLINE
+ulint
+ha_storage_get_size(
+/*================*/
+	const ha_storage_t*	storage);	/*!< in: hash storage */
+
+#ifndef UNIV_NONINL
+#include "ha0storage.ic"
+#endif
+
+#endif /* ha0storage_h */
+/*****************************************************************************
+
+Copyright (c) 1994, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/********************************************************************//**
+@file include/ha0ha.ic
+The hash table with external chains
+
+Created 8/18/1994 Heikki Tuuri
+*************************************************************************/
+
+#include "ut0rnd.h"
+#include "mem0mem.h"
+
+/***********************************************************//**
+Deletes a hash node. */
+UNIV_INTERN
+void
+ha_delete_hash_node(
+/*================*/
+	hash_table_t*	table,		/*!< in: hash table */
+	ha_node_t*	del_node);	/*!< in: node to be deleted */
+
+/******************************************************************//**
+Gets a hash node data.
+@return	pointer to the data */
+UNIV_INLINE
+void*
+ha_node_get_data(
+/*=============*/
+	ha_node_t*	node)	/*!< in: hash chain node */
+{
+	return(node->data);
+}
+
+/******************************************************************//**
+Sets hash node data. */
+UNIV_INLINE
+void
+ha_node_set_data_func(
+/*==================*/
+	ha_node_t*	node,	/*!< in: hash chain node */
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	buf_block_t*	block,	/*!< in: buffer block containing the data */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	void*		data)	/*!< in: pointer to the data */
+{
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	node->block = block;
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	node->data = data;
+}
+
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+/** Sets hash node data.
+@param n	in: hash chain node
+@param b	in: buffer block containing the data
+@param d	in: pointer to the data */
+# define ha_node_set_data(n,b,d) ha_node_set_data_func(n,b,d)
+#else /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+/** Sets hash node data.
+@param n	in: hash chain node
+@param b	in: buffer block containing the data
+@param d	in: pointer to the data */
+# define ha_node_set_data(n,b,d) ha_node_set_data_func(n,d)
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+
+/******************************************************************//**
+Gets the next node in a hash chain.
+@return	next node, NULL if none */
+UNIV_INLINE
+ha_node_t*
+ha_chain_get_next(
+/*==============*/
+	ha_node_t*	node)	/*!< in: hash chain node */
+{
+	return(node->next);
+}
+
+/******************************************************************//**
+Gets the first node in a hash chain.
+@return	first node, NULL if none */
+UNIV_INLINE
+ha_node_t*
+ha_chain_get_first(
+/*===============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold)	/*!< in: fold value determining the chain */
+{
+	return((ha_node_t*)
+	       hash_get_nth_cell(table, hash_calc_hash(fold, table))->node);
+}
+
+/*************************************************************//**
+Looks for an element in a hash table.
+@return pointer to the first hash table node in chain having the fold
+number, NULL if not found */
+UNIV_INLINE
+ha_node_t*
+ha_search(
+/*======*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold)	/*!< in: folded value of the searched data */
+{
+	ha_node_t*	node;
+
+	ASSERT_HASH_MUTEX_OWN(table, fold);
+
+	node = ha_chain_get_first(table, fold);
+
+	while (node) {
+		if (node->fold == fold) {
+
+			return(node);
+		}
+
+		node = ha_chain_get_next(node);
+	}
+
+	return(NULL);
+}
+
+/*************************************************************//**
+Looks for an element in a hash table.
+@return pointer to the data of the first hash table node in chain
+having the fold number, NULL if not found */
+UNIV_INLINE
+void*
+ha_search_and_get_data(
+/*===================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold)	/*!< in: folded value of the searched data */
+{
+	ha_node_t*	node;
+
+	ASSERT_HASH_MUTEX_OWN(table, fold);
+
+	node = ha_chain_get_first(table, fold);
+
+	while (node) {
+		if (node->fold == fold) {
+
+			return(node->data);
+		}
+
+		node = ha_chain_get_next(node);
+	}
+
+	return(NULL);
+}
+
+/*********************************************************//**
+Looks for an element when we know the pointer to the data.
+@return	pointer to the hash table node, NULL if not found in the table */
+UNIV_INLINE
+ha_node_t*
+ha_search_with_data(
+/*================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold,	/*!< in: folded value of the searched data */
+	void*		data)	/*!< in: pointer to the data */
+{
+	ha_node_t*	node;
+
+	ASSERT_HASH_MUTEX_OWN(table, fold);
+
+	node = ha_chain_get_first(table, fold);
+
+	while (node) {
+		if (node->data == data) {
+
+			return(node);
+		}
+
+		node = ha_chain_get_next(node);
+	}
+
+	return(NULL);
+}
+
+/*********************************************************//**
+Looks for an element when we know the pointer to the data, and deletes
+it from the hash table, if found.
+@return	TRUE if found */
+UNIV_INLINE
+ibool
+ha_search_and_delete_if_found(
+/*==========================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold,	/*!< in: folded value of the searched data */
+	void*		data)	/*!< in: pointer to the data */
+{
+	ha_node_t*	node;
+
+	ASSERT_HASH_MUTEX_OWN(table, fold);
+
+	node = ha_search_with_data(table, fold, data);
+
+	if (node) {
+		ha_delete_hash_node(table, node);
+
+		return(TRUE);
+	}
+
+	return(FALSE);
+}
+/*****************************************************************************
+
+Copyright (c) 2007, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/ha0storage.ic
+Hash storage.
+Provides a data structure that stores chunks of data in
+its own storage, avoiding duplicates.
+
+Created September 24, 2007 Vasil Dimov
+*******************************************************/
+
+#include "univ.i"
+#include "ha0storage.h"
+#include "hash0hash.h"
+#include "mem0mem.h"
+
+/** Hash storage for strings */
+struct ha_storage_struct {
+	mem_heap_t*	heap;	/*!< memory heap from which memory is
+				allocated */
+	hash_table_t*	hash;	/*!< hash table used to avoid
+				duplicates */
+};
+
+/** Objects of this type are stored in ha_storage_t */
+typedef struct ha_storage_node_struct ha_storage_node_t;
+/** Objects of this type are stored in ha_storage_struct */
+struct ha_storage_node_struct {
+	ulint			data_len;/*!< length of the data */
+	const void*		data;	/*!< pointer to data */
+	ha_storage_node_t*	next;	/*!< next node in hash chain */
+};
+
+/*******************************************************************//**
+Creates a hash storage. If any of the parameters is 0, then a default
+value is used.
+@return	own: hash storage */
+UNIV_INLINE
+ha_storage_t*
+ha_storage_create(
+/*==============*/
+	ulint	initial_heap_bytes,	/*!< in: initial heap's size */
+	ulint	initial_hash_cells)	/*!< in: initial number of cells
+					in the hash table */
+{
+	ha_storage_t*	storage;
+	mem_heap_t*	heap;
+
+	if (initial_heap_bytes == 0) {
+
+		initial_heap_bytes = HA_STORAGE_DEFAULT_HEAP_BYTES;
+	}
+
+	if (initial_hash_cells == 0) {
+
+		initial_hash_cells = HA_STORAGE_DEFAULT_HASH_CELLS;
+	}
+
+	/* we put "storage" within "storage->heap" */
+
+	heap = mem_heap_create(sizeof(ha_storage_t)
+			       + initial_heap_bytes);
+
+	storage = (ha_storage_t*) mem_heap_alloc(heap,
+						 sizeof(ha_storage_t));
+
+	storage->heap = heap;
+	storage->hash = hash_create(initial_hash_cells);
+
+	return(storage);
+}
+
+/*******************************************************************//**
+Empties a hash storage, freeing memory occupied by data chunks.
+This invalidates any pointers previously returned by ha_storage_put().
+The hash storage is not invalidated itself and can be used again. */
+UNIV_INLINE
+void
+ha_storage_empty(
+/*=============*/
+	ha_storage_t**	storage)	/*!< in/out: hash storage */
+{
+	ha_storage_t	temp_storage;
+
+	temp_storage.heap = (*storage)->heap;
+	temp_storage.hash = (*storage)->hash;
+
+	hash_table_clear(temp_storage.hash);
+	mem_heap_empty(temp_storage.heap);
+
+	*storage = (ha_storage_t*) mem_heap_alloc(temp_storage.heap,
+						  sizeof(ha_storage_t));
+
+	(*storage)->heap = temp_storage.heap;
+	(*storage)->hash = temp_storage.hash;
+}
+
+/*******************************************************************//**
+Frees a hash storage and everything it contains, it cannot be used after
+this call.
+This invalidates any pointers previously returned by ha_storage_put(). */
+UNIV_INLINE
+void
+ha_storage_free(
+/*============*/
+	ha_storage_t*	storage)	/*!< in, own: hash storage */
+{
+	/* order is important because the pointer storage->hash is
+	within the heap */
+	hash_table_free(storage->hash);
+	mem_heap_free(storage->heap);
+}
+
+/*******************************************************************//**
+Gets the size of the memory used by a storage.
+@return	bytes used */
+UNIV_INLINE
+ulint
+ha_storage_get_size(
+/*================*/
+	const ha_storage_t*	storage)	/*!< in: hash storage */
+{
+	ulint	ret;
+
+	ret = mem_heap_get_size(storage->heap);
+
+	/* this assumes hash->heap and hash->heaps are NULL */
+	ret += sizeof(hash_table_t);
+	ret += sizeof(hash_cell_t) * hash_get_n_cells(storage->hash);
+
+	return(ret);
+}
+/*****************************************************************************
+
+Copyright (c) 1997, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/hash0hash.h
+The simple hash table utility
+
+Created 5/20/1997 Heikki Tuuri
+*******************************************************/
+
+#ifndef hash0hash_h
+#define hash0hash_h
+
+#include "univ.i"
+#include "mem0mem.h"
+#ifndef UNIV_HOTBACKUP
+# include "sync0sync.h"
+#endif /* !UNIV_HOTBACKUP */
+
+typedef struct hash_table_struct hash_table_t;
+typedef struct hash_cell_struct hash_cell_t;
+
+typedef void*	hash_node_t;
+
+/* To avoid symbol name clashes. */
+#define hash_create ib_hash_create
+
+/*************************************************************//**
+Creates a hash table with >= n array cells. The actual number
+of cells is chosen to be a prime number slightly bigger than n.
+@return	own: created table */
+UNIV_INTERN
+hash_table_t*
+hash_create(
+/*========*/
+	ulint	n);	/*!< in: number of array cells */
+#ifndef UNIV_HOTBACKUP
+/*************************************************************//**
+Creates a mutex array to protect a hash table. */
+UNIV_INTERN
+void
+hash_create_mutexes_func(
+/*=====================*/
+	hash_table_t*	table,		/*!< in: hash table */
+#ifdef UNIV_SYNC_DEBUG
+	ulint		sync_level,	/*!< in: latching order level of the
+					mutexes: used in the debug version */
+#endif /* UNIV_SYNC_DEBUG */
+	ulint		n_mutexes);	/*!< in: number of mutexes */
+#ifdef UNIV_SYNC_DEBUG
+# define hash_create_mutexes(t,n,level) hash_create_mutexes_func(t,level,n)
+#else /* UNIV_SYNC_DEBUG */
+# define hash_create_mutexes(t,n,level) hash_create_mutexes_func(t,n)
+#endif /* UNIV_SYNC_DEBUG */
+#endif /* !UNIV_HOTBACKUP */
+
+/*************************************************************//**
+Frees a mutex array created with hash_create_mutexes_func(). */
+UNIV_INTERN
+void
+hash_free_mutexes_func(
+/*===================*/
+	hash_table_t*	table);		/*!< in,own: hash table */
+# define hash_free_mutexes(t) hash_free_mutexes_func(t)
+
+/*****************************************************************
+Frees a hash table. */
+UNIV_INTERN
+void
+hash_table_free(
+/*============*/
+	hash_table_t*	table);	/*!< in, own: hash table */
+/**************************************************************//**
+Calculates the hash value from a folded value.
+@return	hashed value */
+UNIV_INLINE
+ulint
+hash_calc_hash(
+/*===========*/
+	ulint		fold,	/*!< in: folded value */
+	hash_table_t*	table);	/*!< in: hash table */
+#ifndef UNIV_HOTBACKUP
+/********************************************************************//**
+Assert that the mutex for the table in a hash operation is owned. */
+# define HASH_ASSERT_OWNED(TABLE, FOLD)					\
+ut_ad(!(TABLE)->mutexes || mutex_own(hash_get_mutex(TABLE, FOLD)));
+#else /* !UNIV_HOTBACKUP */
+# define HASH_ASSERT_OWNED(TABLE, FOLD)
+#endif /* !UNIV_HOTBACKUP */
+
+/*******************************************************************//**
+Inserts a struct to a hash table. */
+
+#define HASH_INSERT(TYPE, NAME, TABLE, FOLD, DATA)\
+do {\
+	hash_cell_t*	cell3333;\
+	TYPE*		struct3333;\
+\
+	HASH_ASSERT_OWNED(TABLE, FOLD)\
+\
+	(DATA)->NAME = NULL;\
+\
+	cell3333 = hash_get_nth_cell(TABLE, hash_calc_hash(FOLD, TABLE));\
+\
+	if (cell3333->node == NULL) {\
+		cell3333->node = DATA;\
+	} else {\
+		struct3333 = (TYPE*) cell3333->node;\
+\
+		while (struct3333->NAME != NULL) {\
+\
+			struct3333 = (TYPE*) struct3333->NAME;\
+		}\
+\
+		struct3333->NAME = DATA;\
+	}\
+} while (0)
+
+#ifdef UNIV_HASH_DEBUG
+# define HASH_ASSERT_VALID(DATA) ut_a((void*) (DATA) != (void*) -1)
+# define HASH_INVALIDATE(DATA, NAME) DATA->NAME = (void*) -1
+#else
+# define HASH_ASSERT_VALID(DATA) do {} while (0)
+# define HASH_INVALIDATE(DATA, NAME) do {} while (0)
+#endif
+
+/*******************************************************************//**
+Deletes a struct from a hash table. */
+
+#define HASH_DELETE(TYPE, NAME, TABLE, FOLD, DATA)\
+do {\
+	hash_cell_t*	cell3333;\
+	TYPE*		struct3333;\
+\
+	HASH_ASSERT_OWNED(TABLE, FOLD)\
+\
+	cell3333 = hash_get_nth_cell(TABLE, hash_calc_hash(FOLD, TABLE));\
+\
+	if (cell3333->node == DATA) {\
+		HASH_ASSERT_VALID(DATA->NAME);\
+		cell3333->node = DATA->NAME;\
+	} else {\
+		struct3333 = (TYPE*) cell3333->node;\
+\
+		while (struct3333->NAME != DATA) {\
+\
+			struct3333 = (TYPE*) struct3333->NAME;\
+			ut_a(struct3333);\
+		}\
+\
+		struct3333->NAME = DATA->NAME;\
+	}\
+	HASH_INVALIDATE(DATA, NAME);\
+} while (0)
+
+/*******************************************************************//**
+Gets the first struct in a hash chain, NULL if none. */
+
+#define HASH_GET_FIRST(TABLE, HASH_VAL)\
+	(hash_get_nth_cell(TABLE, HASH_VAL)->node)
+
+/*******************************************************************//**
+Gets the next struct in a hash chain, NULL if none. */
+
+#define HASH_GET_NEXT(NAME, DATA)	((DATA)->NAME)
+
+/********************************************************************//**
+Looks for a struct in a hash table. */
+#define HASH_SEARCH(NAME, TABLE, FOLD, TYPE, DATA, ASSERTION, TEST)\
+{\
+\
+	HASH_ASSERT_OWNED(TABLE, FOLD)\
+\
+	(DATA) = (TYPE) HASH_GET_FIRST(TABLE, hash_calc_hash(FOLD, TABLE));\
+	HASH_ASSERT_VALID(DATA);\
+\
+	while ((DATA) != NULL) {\
+		ASSERTION;\
+		if (TEST) {\
+			break;\
+		} else {\
+			HASH_ASSERT_VALID(HASH_GET_NEXT(NAME, DATA));\
+			(DATA) = (TYPE) HASH_GET_NEXT(NAME, DATA);\
+		}\
+	}\
+}
+
+/********************************************************************//**
+Looks for an item in all hash buckets. */
+#define HASH_SEARCH_ALL(NAME, TABLE, TYPE, DATA, ASSERTION, TEST)	\
+do {									\
+	ulint	i3333;							\
+									\
+	for (i3333 = (TABLE)->n_cells; i3333--; ) {			\
+		(DATA) = (TYPE) HASH_GET_FIRST(TABLE, i3333);		\
+									\
+		while ((DATA) != NULL) {				\
+			HASH_ASSERT_VALID(DATA);			\
+			ASSERTION;					\
+									\
+			if (TEST) {					\
+				break;					\
+			}						\
+									\
+			(DATA) = (TYPE) HASH_GET_NEXT(NAME, DATA);	\
+		}							\
+									\
+		if ((DATA) != NULL) {					\
+			break;						\
+		}							\
+	}								\
+} while (0)
+
+/************************************************************//**
+Gets the nth cell in a hash table.
+@return	pointer to cell */
+UNIV_INLINE
+hash_cell_t*
+hash_get_nth_cell(
+/*==============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		n);	/*!< in: cell index */
+
+/*************************************************************//**
+Clears a hash table so that all the cells become empty. */
+UNIV_INLINE
+void
+hash_table_clear(
+/*=============*/
+	hash_table_t*	table);	/*!< in/out: hash table */
+
+/*************************************************************//**
+Returns the number of cells in a hash table.
+@return	number of cells */
+UNIV_INLINE
+ulint
+hash_get_n_cells(
+/*=============*/
+	hash_table_t*	table);	/*!< in: table */
+/*******************************************************************//**
+Deletes a struct which is stored in the heap of the hash table, and compacts
+the heap. The fold value must be stored in the struct NODE in a field named
+'fold'. */
+
+#define HASH_DELETE_AND_COMPACT(TYPE, NAME, TABLE, NODE)\
+do {\
+	TYPE*		node111;\
+	TYPE*		top_node111;\
+	hash_cell_t*	cell111;\
+	ulint		fold111;\
+\
+	fold111 = (NODE)->fold;\
+\
+	HASH_DELETE(TYPE, NAME, TABLE, fold111, NODE);\
+\
+	top_node111 = (TYPE*)mem_heap_get_top(\
+				hash_get_heap(TABLE, fold111),\
+							sizeof(TYPE));\
+\
+	/* If the node to remove is not the top node in the heap, compact the\
+	heap of nodes by moving the top node in the place of NODE. */\
+\
+	if (NODE != top_node111) {\
+\
+		/* Copy the top node in place of NODE */\
+\
+		*(NODE) = *top_node111;\
+\
+		cell111 = hash_get_nth_cell(TABLE,\
+				hash_calc_hash(top_node111->fold, TABLE));\
+\
+		/* Look for the pointer to the top node, to update it */\
+\
+		if (cell111->node == top_node111) {\
+			/* The top node is the first in the chain */\
+\
+			cell111->node = NODE;\
+		} else {\
+			/* We have to look for the predecessor of the top\
+			node */\
+			node111 = cell111->node;\
+\
+			while (top_node111 != HASH_GET_NEXT(NAME, node111)) {\
+\
+				node111 = HASH_GET_NEXT(NAME, node111);\
+			}\
+\
+			/* Now we have the predecessor node */\
+\
+			node111->NAME = NODE;\
+		}\
+	}\
+\
+	/* Free the space occupied by the top node */\
+\
+	mem_heap_free_top(hash_get_heap(TABLE, fold111), sizeof(TYPE));\
+} while (0)
+
+#ifndef UNIV_HOTBACKUP
+/****************************************************************//**
+Move all hash table entries from OLD_TABLE to NEW_TABLE. */
+
+#define HASH_MIGRATE(OLD_TABLE, NEW_TABLE, NODE_TYPE, PTR_NAME, FOLD_FUNC) \
+do {\
+	ulint		i2222;\
+	ulint		cell_count2222;\
+\
+	cell_count2222 = hash_get_n_cells(OLD_TABLE);\
+\
+	for (i2222 = 0; i2222 < cell_count2222; i2222++) {\
+		NODE_TYPE*	node2222 = HASH_GET_FIRST((OLD_TABLE), i2222);\
+\
+		while (node2222) {\
+			NODE_TYPE*	next2222 = node2222->PTR_NAME;\
+			ulint		fold2222 = FOLD_FUNC(node2222);\
+\
+			HASH_INSERT(NODE_TYPE, PTR_NAME, (NEW_TABLE),\
+				fold2222, node2222);\
+\
+			node2222 = next2222;\
+		}\
+	}\
+} while (0)
+
+/************************************************************//**
+Gets the mutex index for a fold value in a hash table.
+@return	mutex number */
+UNIV_INLINE
+ulint
+hash_get_mutex_no(
+/*==============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold);	/*!< in: fold */
+/************************************************************//**
+Gets the nth heap in a hash table.
+@return	mem heap */
+UNIV_INLINE
+mem_heap_t*
+hash_get_nth_heap(
+/*==============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		i);	/*!< in: index of the heap */
+/************************************************************//**
+Gets the heap for a fold value in a hash table.
+@return	mem heap */
+UNIV_INLINE
+mem_heap_t*
+hash_get_heap(
+/*==========*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold);	/*!< in: fold */
+/************************************************************//**
+Gets the nth mutex in a hash table.
+@return	mutex */
+UNIV_INLINE
+mutex_t*
+hash_get_nth_mutex(
+/*===============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		i);	/*!< in: index of the mutex */
+/************************************************************//**
+Gets the mutex for a fold value in a hash table.
+@return	mutex */
+UNIV_INLINE
+mutex_t*
+hash_get_mutex(
+/*===========*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold);	/*!< in: fold */
+/************************************************************//**
+Reserves the mutex for a fold value in a hash table. */
+UNIV_INTERN
+void
+hash_mutex_enter(
+/*=============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold);	/*!< in: fold */
+/************************************************************//**
+Releases the mutex for a fold value in a hash table. */
+UNIV_INTERN
+void
+hash_mutex_exit(
+/*============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold);	/*!< in: fold */
+/************************************************************//**
+Reserves all the mutexes of a hash table, in an ascending order. */
+UNIV_INTERN
+void
+hash_mutex_enter_all(
+/*=================*/
+	hash_table_t*	table);	/*!< in: hash table */
+/************************************************************//**
+Releases all the mutexes of a hash table. */
+UNIV_INTERN
+void
+hash_mutex_exit_all(
+/*================*/
+	hash_table_t*	table);	/*!< in: hash table */
+#else /* !UNIV_HOTBACKUP */
+# define hash_get_heap(table, fold)	((table)->heap)
+# define hash_mutex_enter(table, fold)	((void) 0)
+# define hash_mutex_exit(table, fold)	((void) 0)
+#endif /* !UNIV_HOTBACKUP */
+
+struct hash_cell_struct{
+	void*	node;	/*!< hash chain node, NULL if none */
+};
+
+/* The hash table structure */
+struct hash_table_struct {
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+# ifndef UNIV_HOTBACKUP
+	ibool		adaptive;/* TRUE if this is the hash table of the
+				adaptive hash index */
+# endif /* !UNIV_HOTBACKUP */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	ulint		n_cells;/* number of cells in the hash table */
+	hash_cell_t*	array;	/*!< pointer to cell array */
+#ifndef UNIV_HOTBACKUP
+	ulint		n_mutexes;/* if mutexes != NULL, then the number of
+				mutexes, must be a power of 2 */
+	mutex_t*	mutexes;/* NULL, or an array of mutexes used to
+				protect segments of the hash table */
+	mem_heap_t**	heaps;	/*!< if this is non-NULL, hash chain nodes for
+				external chaining can be allocated from these
+				memory heaps; there are then n_mutexes many of
+				these heaps */
+#endif /* !UNIV_HOTBACKUP */
+	mem_heap_t*	heap;
+	ulint		magic_n;
+};
+
+#define HASH_TABLE_MAGIC_N	76561114
+
+#ifndef UNIV_NONINL
+#include "hash0hash.ic"
+#endif
+
+#endif
+/*****************************************************************************
+
+Copyright (c) 1997, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file include/hash0hash.ic
+The simple hash table utility
+
+Created 5/20/1997 Heikki Tuuri
+*******************************************************/
+
+#include "ut0rnd.h"
+
+/************************************************************//**
+Gets the nth cell in a hash table.
+@return	pointer to cell */
+UNIV_INLINE
+hash_cell_t*
+hash_get_nth_cell(
+/*==============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		n)	/*!< in: cell index */
+{
+	ut_ad(n < table->n_cells);
+
+	return(table->array + n);
+}
+
+/*************************************************************//**
+Clears a hash table so that all the cells become empty. */
+UNIV_INLINE
+void
+hash_table_clear(
+/*=============*/
+	hash_table_t*	table)	/*!< in/out: hash table */
+{
+	memset(table->array, 0x0,
+	       table->n_cells * sizeof(*table->array));
+}
+
+/*************************************************************//**
+Returns the number of cells in a hash table.
+@return	number of cells */
+UNIV_INLINE
+ulint
+hash_get_n_cells(
+/*=============*/
+	hash_table_t*	table)	/*!< in: table */
+{
+	return(table->n_cells);
+}
+
+/**************************************************************//**
+Calculates the hash value from a folded value.
+@return	hashed value */
+UNIV_INLINE
+ulint
+hash_calc_hash(
+/*===========*/
+	ulint		fold,	/*!< in: folded value */
+	hash_table_t*	table)	/*!< in: hash table */
+{
+	return(ut_hash_ulint(fold, table->n_cells));
+}
+
+#ifndef UNIV_HOTBACKUP
+/************************************************************//**
+Gets the mutex index for a fold value in a hash table.
+@return	mutex number */
+UNIV_INLINE
+ulint
+hash_get_mutex_no(
+/*==============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold)	/*!< in: fold */
+{
+	ut_ad(ut_is_2pow(table->n_mutexes));
+	return(ut_2pow_remainder(hash_calc_hash(fold, table),
+				 table->n_mutexes));
+}
+
+/************************************************************//**
+Gets the nth heap in a hash table.
+@return	mem heap */
+UNIV_INLINE
+mem_heap_t*
+hash_get_nth_heap(
+/*==============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		i)	/*!< in: index of the heap */
+{
+	ut_ad(i < table->n_mutexes);
+
+	return(table->heaps[i]);
+}
+
+/************************************************************//**
+Gets the heap for a fold value in a hash table.
+@return	mem heap */
+UNIV_INLINE
+mem_heap_t*
+hash_get_heap(
+/*==========*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold)	/*!< in: fold */
+{
+	ulint	i;
+
+	if (table->heap) {
+		return(table->heap);
+	}
+
+	i = hash_get_mutex_no(table, fold);
+
+	return(hash_get_nth_heap(table, i));
+}
+
+/************************************************************//**
+Gets the nth mutex in a hash table.
+@return	mutex */
+UNIV_INLINE
+mutex_t*
+hash_get_nth_mutex(
+/*===============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		i)	/*!< in: index of the mutex */
+{
+	ut_ad(i < table->n_mutexes);
+
+	return(table->mutexes + i);
+}
+
+/************************************************************//**
+Gets the mutex for a fold value in a hash table.
+@return	mutex */
+UNIV_INLINE
+mutex_t*
+hash_get_mutex(
+/*===========*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold)	/*!< in: fold */
+{
+	ulint	i;
+
+	i = hash_get_mutex_no(table, fold);
+
+	return(hash_get_nth_mutex(table, i));
+}
+#endif /* !UNIV_HOTBACKUP */
+/*****************************************************************************
+
+Copyright (c) 1996, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/********************************************************************//**
+@file include/btr0sea.h
+The index tree adaptive search
+
+Created 2/17/1996 Heikki Tuuri
+*************************************************************************/
+
+#ifndef btr0sea_h
+#define btr0sea_h
+
+#include "univ.i"
+
+#include "rem0rec.h"
+#include "dict0dict.h"
+#include "btr0types.h"
+#include "mtr0mtr.h"
+#include "ha0ha.h"
+
+/*****************************************************************//**
+Creates and initializes the adaptive search system at a database start. */
+UNIV_INTERN
+void
+btr_search_sys_create(
+/*==================*/
+	ulint	hash_size);	/*!< in: hash index hash table size */
+/*****************************************************************//**
+Frees the adaptive search system at a database shutdown. */
+UNIV_INTERN
+void
+btr_search_sys_free(void);
+/*=====================*/
+
+/********************************************************************//**
+Disable the adaptive hash search system and empty the index. */
+UNIV_INTERN
+void
+btr_search_disable(void);
+/*====================*/
+/********************************************************************//**
+Enable the adaptive hash search system. */
+UNIV_INTERN
+void
+btr_search_enable(void);
+/*====================*/
+
+/********************************************************************//**
+Returns search info for an index.
+@return	search info; search mutex reserved */
+UNIV_INLINE
+btr_search_t*
+btr_search_get_info(
+/*================*/
+	dict_index_t*	index);	/*!< in: index */
+/*****************************************************************//**
+Creates and initializes a search info struct.
+@return	own: search info struct */
+UNIV_INTERN
+btr_search_t*
+btr_search_info_create(
+/*===================*/
+	mem_heap_t*	heap);	/*!< in: heap where created */
+/*****************************************************************//**
+Returns the value of ref_count. The value is protected by
+btr_search_latch.
+@return	ref_count value. */
+UNIV_INTERN
+ulint
+btr_search_info_get_ref_count(
+/*==========================*/
+	btr_search_t*   info);	/*!< in: search info. */
+/*********************************************************************//**
+Updates the search info. */
+UNIV_INLINE
+void
+btr_search_info_update(
+/*===================*/
+	dict_index_t*	index,	/*!< in: index of the cursor */
+	btr_cur_t*	cursor);/*!< in: cursor which was just positioned */
+/******************************************************************//**
+Tries to guess the right search position based on the hash search info
+of the index. Note that if mode is PAGE_CUR_LE, which is used in inserts,
+and the function returns TRUE, then cursor->up_match and cursor->low_match
+both have sensible values.
+@return	TRUE if succeeded */
+UNIV_INTERN
+ibool
+btr_search_guess_on_hash(
+/*=====================*/
+	dict_index_t*	index,		/*!< in: index */
+	btr_search_t*	info,		/*!< in: index search info */
+	const dtuple_t*	tuple,		/*!< in: logical record */
+	ulint		mode,		/*!< in: PAGE_CUR_L, ... */
+	ulint		latch_mode,	/*!< in: BTR_SEARCH_LEAF, ... */
+	btr_cur_t*	cursor,		/*!< out: tree cursor */
+	ulint		has_search_latch,/*!< in: latch mode the caller
+					currently has on btr_search_latch:
+					RW_S_LATCH, RW_X_LATCH, or 0 */
+	mtr_t*		mtr);		/*!< in: mtr */
+/********************************************************************//**
+Moves or deletes hash entries for moved records. If new_page is already hashed,
+then the hash index for page, if any, is dropped. If new_page is not hashed,
+and page is hashed, then a new hash index is built to new_page with the same
+parameters as page (this often happens when a page is split). */
+UNIV_INTERN
+void
+btr_search_move_or_delete_hash_entries(
+/*===================================*/
+	buf_block_t*	new_block,	/*!< in: records are copied
+					to this page */
+	buf_block_t*	block,		/*!< in: index page from which
+					records were copied, and the
+					copied records will be deleted
+					from this page */
+	dict_index_t*	index);		/*!< in: record descriptor */
+/********************************************************************//**
+Drops a page hash index. */
+UNIV_INTERN
+void
+btr_search_drop_page_hash_index(
+/*============================*/
+	buf_block_t*	block);	/*!< in: block containing index page,
+				s- or x-latched, or an index page
+				for which we know that
+				block->buf_fix_count == 0 */
+/********************************************************************//**
+Drops a page hash index when a page is freed from a fseg to the file system.
+Drops possible hash index if the page happens to be in the buffer pool. */
+UNIV_INTERN
+void
+btr_search_drop_page_hash_when_freed(
+/*=================================*/
+	ulint	space,		/*!< in: space id */
+	ulint	zip_size,	/*!< in: compressed page size in bytes
+				or 0 for uncompressed pages */
+	ulint	page_no);	/*!< in: page number */
+/********************************************************************//**
+Updates the page hash index when a single record is inserted on a page. */
+UNIV_INTERN
+void
+btr_search_update_hash_node_on_insert(
+/*==================================*/
+	btr_cur_t*	cursor);/*!< in: cursor which was positioned to the
+				place to insert using btr_cur_search_...,
+				and the new record has been inserted next
+				to the cursor */
+/********************************************************************//**
+Updates the page hash index when a single record is inserted on a page. */
+UNIV_INTERN
+void
+btr_search_update_hash_on_insert(
+/*=============================*/
+	btr_cur_t*	cursor);/*!< in: cursor which was positioned to the
+				place to insert using btr_cur_search_...,
+				and the new record has been inserted next
+				to the cursor */
+/********************************************************************//**
+Updates the page hash index when a single record is deleted from a page. */
+UNIV_INTERN
+void
+btr_search_update_hash_on_delete(
+/*=============================*/
+	btr_cur_t*	cursor);/*!< in: cursor which was positioned on the
+				record to delete using btr_cur_search_...,
+				the record is not yet deleted */
+/********************************************************************//**
+Validates the search system.
+@return	TRUE if ok */
+UNIV_INTERN
+ibool
+btr_search_validate(void);
+/*======================*/
+/*********************************************************************
+Reset global configuration variables. */
+UNIV_INTERN
+void
+btr_search_var_init(void);
+/*=====================*/
+/*********************************************************************
+Closes the adaptive search system at a database shutdown. */
+UNIV_INTERN
+void
+btr_search_sys_close(void);
+/*======================*/
+
+/** Flag: has the search system been enabled?
+Protected by btr_search_latch and btr_search_enabled_mutex. */
+extern char btr_search_enabled;
+
+/** The search info struct in an index */
+struct btr_search_struct{
+	ulint	ref_count;	/*!< Number of blocks in this index tree
+				that have search index built
+				i.e. block->index points to this index.
+				Protected by btr_search_latch except
+				when during initialization in
+				btr_search_info_create(). */
+
+	/* @{ The following fields are not protected by any latch.
+	Unfortunately, this means that they must be aligned to
+	the machine word, i.e., they cannot be turned into bit-fields. */
+	buf_block_t* root_guess;/*!< the root page frame when it was last time
+				fetched, or NULL */
+	ulint	hash_analysis;	/*!< when this exceeds
+				BTR_SEARCH_HASH_ANALYSIS, the hash
+				analysis starts; this is reset if no
+				success noticed */
+	ibool	last_hash_succ;	/*!< TRUE if the last search would have
+				succeeded, or did succeed, using the hash
+				index; NOTE that the value here is not exact:
+				it is not calculated for every search, and the
+				calculation itself is not always accurate! */
+	ulint	n_hash_potential;
+				/*!< number of consecutive searches
+				which would have succeeded, or did succeed,
+				using the hash index;
+				the range is 0 .. BTR_SEARCH_BUILD_LIMIT + 5 */
+	/* @} */
+	/*---------------------- @{ */
+	ulint	n_fields;	/*!< recommended prefix length for hash search:
+				number of full fields */
+	ulint	n_bytes;	/*!< recommended prefix: number of bytes in
+				an incomplete field
+				@see BTR_PAGE_MAX_REC_SIZE */
+	ibool	left_side;	/*!< TRUE or FALSE, depending on whether
+				the leftmost record of several records with
+				the same prefix should be indexed in the
+				hash index */
+	/*---------------------- @} */
+#ifdef UNIV_SEARCH_PERF_STAT
+	ulint	n_hash_succ;	/*!< number of successful hash searches thus
+				far */
+	ulint	n_hash_fail;	/*!< number of failed hash searches */
+	ulint	n_patt_succ;	/*!< number of successful pattern searches thus
+				far */
+	ulint	n_searches;	/*!< number of searches */
+#endif /* UNIV_SEARCH_PERF_STAT */
+#ifdef UNIV_DEBUG
+	ulint	magic_n;	/*!< magic number @see BTR_SEARCH_MAGIC_N */
+/** value of btr_search_struct::magic_n, used in assertions */
+# define BTR_SEARCH_MAGIC_N	1112765
+#endif /* UNIV_DEBUG */
+};
+
+/** The hash index system */
+typedef struct btr_search_sys_struct	btr_search_sys_t;
+
+/** The hash index system */
+struct btr_search_sys_struct{
+	hash_table_t*	hash_index;	/*!< the adaptive hash index,
+					mapping dtuple_fold values
+					to rec_t pointers on index pages */
+};
+
+/** The adaptive hash index */
+extern btr_search_sys_t*	btr_search_sys;
+
+/** @brief The latch protecting the adaptive search system
+
+This latch protects the
+(1) hash index;
+(2) columns of a record to which we have a pointer in the hash index;
+
+but does NOT protect:
+
+(3) next record offset field in a record;
+(4) next or previous records on the same page.
+
+Bear in mind (3) and (4) when using the hash index.
+*/
+extern rw_lock_t*	btr_search_latch_temp;
+
+/** The latch protecting the adaptive search system */
+#define btr_search_latch	(*btr_search_latch_temp)
+
+#ifdef UNIV_SEARCH_PERF_STAT
+/** Number of successful adaptive hash index lookups */
+extern ulint	btr_search_n_succ;
+/** Number of failed adaptive hash index lookups */
+extern ulint	btr_search_n_hash_fail;
+#endif /* UNIV_SEARCH_PERF_STAT */
+
+/** After change in n_fields or n_bytes in info, this many rounds are waited
+before starting the hash analysis again: this is to save CPU time when there
+is no hope in building a hash index. */
+#define BTR_SEARCH_HASH_ANALYSIS	17
+
+/** Limit of consecutive searches for trying a search shortcut on the search
+pattern */
+#define BTR_SEARCH_ON_PATTERN_LIMIT	3
+
+/** Limit of consecutive searches for trying a search shortcut using
+the hash index */
+#define BTR_SEARCH_ON_HASH_LIMIT	3
+
+/** We do this many searches before trying to keep the search latch
+over calls from MySQL. If we notice someone waiting for the latch, we
+again set this much timeout. This is to reduce contention. */
+#define BTR_SEA_TIMEOUT			10000
+
+#ifndef UNIV_NONINL
+#include "btr0sea.ic"
+#endif
+
+#endif
+/*****************************************************************************
+
+Copyright (c) 1996, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/********************************************************************//**
+@file include/btr0sea.ic
+The index tree adaptive search
+
+Created 2/17/1996 Heikki Tuuri
+*************************************************************************/
+
+#include "dict0mem.h"
+#include "btr0cur.h"
+#include "buf0buf.h"
+
+/*********************************************************************//**
+Updates the search info. */
+UNIV_INTERN
+void
+btr_search_info_update_slow(
+/*========================*/
+	btr_search_t*	info,	/*!< in/out: search info */
+	btr_cur_t*	cursor);/*!< in: cursor which was just positioned */
+
+/********************************************************************//**
+Returns search info for an index.
+@return	search info; search mutex reserved */
+UNIV_INLINE
+btr_search_t*
+btr_search_get_info(
+/*================*/
+	dict_index_t*	index)	/*!< in: index */
+{
+	ut_ad(index);
+
+	return(index->search_info);
+}
+
+/*********************************************************************//**
+Updates the search info. */
+UNIV_INLINE
+void
+btr_search_info_update(
+/*===================*/
+	dict_index_t*	index,	/*!< in: index of the cursor */
+	btr_cur_t*	cursor)	/*!< in: cursor which was just positioned */
+{
+	btr_search_t*	info;
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_SHARED));
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	info = btr_search_get_info(index);
+
+	info->hash_analysis++;
+
+	if (info->hash_analysis < BTR_SEARCH_HASH_ANALYSIS) {
+
+		/* Do nothing */
+
+		return;
+
+	}
+
+	ut_ad(cursor->flag != BTR_CUR_HASH);
+
+	btr_search_info_update_slow(info, cursor);
+}
+
+
+=== IMPLEMENTATION ===
+
+/*****************************************************************************
+
+Copyright (c) 1994, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/********************************************************************//**
+@file ha/ha0ha.c
+The hash table with external chains
+
+Created 8/22/1994 Heikki Tuuri
+*************************************************************************/
+
+#include "ha0ha.h"
+#ifdef UNIV_NONINL
+#include "ha0ha.ic"
+#endif
+
+#ifdef UNIV_DEBUG
+# include "buf0buf.h"
+#endif /* UNIV_DEBUG */
+#ifdef UNIV_SYNC_DEBUG
+# include "btr0sea.h"
+#endif /* UNIV_SYNC_DEBUG */
+#include "page0page.h"
+
+/*************************************************************//**
+Creates a hash table with at least n array cells.  The actual number
+of cells is chosen to be a prime number slightly bigger than n.
+@return	own: created table */
+UNIV_INTERN
+hash_table_t*
+ha_create_func(
+/*===========*/
+	ulint	n,		/*!< in: number of array cells */
+#ifdef UNIV_SYNC_DEBUG
+	ulint	mutex_level,	/*!< in: level of the mutexes in the latching
+				order: this is used in the debug version */
+#endif /* UNIV_SYNC_DEBUG */
+	ulint	n_mutexes)	/*!< in: number of mutexes to protect the
+				hash table: must be a power of 2, or 0 */
+{
+	hash_table_t*	table;
+#ifndef UNIV_HOTBACKUP
+	ulint		i;
+#endif /* !UNIV_HOTBACKUP */
+
+	ut_ad(ut_is_2pow(n_mutexes));
+	table = hash_create(n);
+
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+# ifndef UNIV_HOTBACKUP
+	table->adaptive = TRUE;
+# endif /* !UNIV_HOTBACKUP */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	/* Creating MEM_HEAP_BTR_SEARCH type heaps can potentially fail,
+	but in practise it never should in this case, hence the asserts. */
+
+	if (n_mutexes == 0) {
+		table->heap = mem_heap_create_in_btr_search(
+			ut_min(4096, MEM_MAX_ALLOC_IN_BUF));
+		ut_a(table->heap);
+
+		return(table);
+	}
+
+#ifndef UNIV_HOTBACKUP
+	hash_create_mutexes(table, n_mutexes, mutex_level);
+
+	table->heaps = mem_alloc(n_mutexes * sizeof(void*));
+
+	for (i = 0; i < n_mutexes; i++) {
+		table->heaps[i] = mem_heap_create_in_btr_search(4096);
+		ut_a(table->heaps[i]);
+	}
+#endif /* !UNIV_HOTBACKUP */
+
+	return(table);
+}
+
+/*************************************************************//**
+Empties a hash table and frees the memory heaps. */
+UNIV_INTERN
+void
+ha_clear(
+/*=====*/
+	hash_table_t*	table)	/*!< in, own: hash table */
+{
+	ulint	i;
+	ulint	n;
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(rw_lock_own(&btr_search_latch, RW_LOCK_EXCLUSIVE));
+#endif /* UNIV_SYNC_DEBUG */
+
+#ifndef UNIV_HOTBACKUP
+	/* Free the memory heaps. */
+	n = table->n_mutexes;
+
+	for (i = 0; i < n; i++) {
+		mem_heap_free(table->heaps[i]);
+	}
+#endif /* !UNIV_HOTBACKUP */
+
+	/* Clear the hash table. */
+	n = hash_get_n_cells(table);
+
+	for (i = 0; i < n; i++) {
+		hash_get_nth_cell(table, i)->node = NULL;
+	}
+}
+
+/*************************************************************//**
+Inserts an entry into a hash table. If an entry with the same fold number
+is found, its node is updated to point to the new data, and no new node
+is inserted.
+@return	TRUE if succeed, FALSE if no more memory could be allocated */
+UNIV_INTERN
+ibool
+ha_insert_for_fold_func(
+/*====================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold,	/*!< in: folded value of data; if a node with
+				the same fold value already exists, it is
+				updated to point to the same data, and no new
+				node is created! */
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	buf_block_t*	block,	/*!< in: buffer block containing the data */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	void*		data)	/*!< in: data, must not be NULL */
+{
+	hash_cell_t*	cell;
+	ha_node_t*	node;
+	ha_node_t*	prev_node;
+	ulint		hash;
+
+	ut_ad(table && data);
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	ut_a(block->frame == page_align(data));
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	ASSERT_HASH_MUTEX_OWN(table, fold);
+
+	hash = hash_calc_hash(fold, table);
+
+	cell = hash_get_nth_cell(table, hash);
+
+	prev_node = cell->node;
+
+	while (prev_node != NULL) {
+		if (prev_node->fold == fold) {
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+# ifndef UNIV_HOTBACKUP
+			if (table->adaptive) {
+				buf_block_t* prev_block = prev_node->block;
+				ut_a(prev_block->frame
+				     == page_align(prev_node->data));
+				ut_a(prev_block->n_pointers > 0);
+				prev_block->n_pointers--;
+				block->n_pointers++;
+			}
+# endif /* !UNIV_HOTBACKUP */
+
+			prev_node->block = block;
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+			prev_node->data = data;
+
+			return(TRUE);
+		}
+
+		prev_node = prev_node->next;
+	}
+
+	/* We have to allocate a new chain node */
+
+	node = mem_heap_alloc(hash_get_heap(table, fold), sizeof(ha_node_t));
+
+	if (node == NULL) {
+		/* It was a btr search type memory heap and at the moment
+		no more memory could be allocated: return */
+
+		ut_ad(hash_get_heap(table, fold)->type & MEM_HEAP_BTR_SEARCH);
+
+		return(FALSE);
+	}
+
+	ha_node_set_data(node, block, data);
+
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+# ifndef UNIV_HOTBACKUP
+	if (table->adaptive) {
+		block->n_pointers++;
+	}
+# endif /* !UNIV_HOTBACKUP */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+
+	node->fold = fold;
+
+	node->next = NULL;
+
+	prev_node = cell->node;
+
+	if (prev_node == NULL) {
+
+		cell->node = node;
+
+		return(TRUE);
+	}
+
+	while (prev_node->next != NULL) {
+
+		prev_node = prev_node->next;
+	}
+
+	prev_node->next = node;
+
+	return(TRUE);
+}
+
+/***********************************************************//**
+Deletes a hash node. */
+UNIV_INTERN
+void
+ha_delete_hash_node(
+/*================*/
+	hash_table_t*	table,		/*!< in: hash table */
+	ha_node_t*	del_node)	/*!< in: node to be deleted */
+{
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+# ifndef UNIV_HOTBACKUP
+	if (table->adaptive) {
+		ut_a(del_node->block->frame = page_align(del_node->data));
+		ut_a(del_node->block->n_pointers > 0);
+		del_node->block->n_pointers--;
+	}
+# endif /* !UNIV_HOTBACKUP */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+
+	HASH_DELETE_AND_COMPACT(ha_node_t, next, table, del_node);
+}
+
+/*********************************************************//**
+Looks for an element when we know the pointer to the data, and updates
+the pointer to data, if found. */
+UNIV_INTERN
+void
+ha_search_and_update_if_found_func(
+/*===============================*/
+	hash_table_t*	table,	/*!< in/out: hash table */
+	ulint		fold,	/*!< in: folded value of the searched data */
+	void*		data,	/*!< in: pointer to the data */
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	buf_block_t*	new_block,/*!< in: block containing new_data */
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	void*		new_data)/*!< in: new pointer to the data */
+{
+	ha_node_t*	node;
+
+	ASSERT_HASH_MUTEX_OWN(table, fold);
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	ut_a(new_block->frame == page_align(new_data));
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+
+	node = ha_search_with_data(table, fold, data);
+
+	if (node) {
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+# ifndef UNIV_HOTBACKUP
+		if (table->adaptive) {
+			ut_a(node->block->n_pointers > 0);
+			node->block->n_pointers--;
+			new_block->n_pointers++;
+		}
+# endif /* !UNIV_HOTBACKUP */
+
+		node->block = new_block;
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+		node->data = new_data;
+	}
+}
+
+#ifndef UNIV_HOTBACKUP
+/*****************************************************************//**
+Removes from the chain determined by fold all nodes whose data pointer
+points to the page given. */
+UNIV_INTERN
+void
+ha_remove_all_nodes_to_page(
+/*========================*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold,	/*!< in: fold value */
+	const page_t*	page)	/*!< in: buffer page */
+{
+	ha_node_t*	node;
+
+	ASSERT_HASH_MUTEX_OWN(table, fold);
+
+	node = ha_chain_get_first(table, fold);
+
+	while (node) {
+		if (page_align(ha_node_get_data(node)) == page) {
+
+			/* Remove the hash node */
+
+			ha_delete_hash_node(table, node);
+
+			/* Start again from the first node in the chain
+			because the deletion may compact the heap of
+			nodes and move other nodes! */
+
+			node = ha_chain_get_first(table, fold);
+		} else {
+			node = ha_chain_get_next(node);
+		}
+	}
+#ifdef UNIV_DEBUG
+	/* Check that all nodes really got deleted */
+
+	node = ha_chain_get_first(table, fold);
+
+	while (node) {
+		ut_a(page_align(ha_node_get_data(node)) != page);
+
+		node = ha_chain_get_next(node);
+	}
+#endif
+}
+
+/*************************************************************//**
+Validates a given range of the cells in hash table.
+@return	TRUE if ok */
+UNIV_INTERN
+ibool
+ha_validate(
+/*========*/
+	hash_table_t*	table,		/*!< in: hash table */
+	ulint		start_index,	/*!< in: start index */
+	ulint		end_index)	/*!< in: end index */
+{
+	hash_cell_t*	cell;
+	ha_node_t*	node;
+	ibool		ok	= TRUE;
+	ulint		i;
+
+	ut_a(start_index <= end_index);
+	ut_a(start_index < hash_get_n_cells(table));
+	ut_a(end_index < hash_get_n_cells(table));
+
+	for (i = start_index; i <= end_index; i++) {
+
+		cell = hash_get_nth_cell(table, i);
+
+		node = cell->node;
+
+		while (node) {
+			if (hash_calc_hash(node->fold, table) != i) {
+				ut_print_timestamp(ib_stream);
+				ib_logger(ib_stream,
+					"InnoDB: Error: hash table node"
+					" fold value %lu does not\n"
+					"InnoDB: match the cell number %lu.\n",
+					(ulong) node->fold, (ulong) i);
+
+				ok = FALSE;
+			}
+
+			node = node->next;
+		}
+	}
+
+	return(ok);
+}
+
+/*************************************************************//**
+Prints info of a hash table. */
+UNIV_INTERN
+void
+ha_print_info(
+/*==========*/
+	ib_stream_t	ib_stream,	/*!< in: file where to print */
+	hash_table_t*	table)		/*!< in: hash table */
+{
+#ifdef PRINT_USED_CELLS
+	hash_cell_t*	cell;
+	ulint		cells	= 0;
+	ulint		i;
+#endif /* PRINT_USED_CELLS */
+	ulint		n_bufs;
+
+#ifdef PRINT_USED_CELLS
+	for (i = 0; i < hash_get_n_cells(table); i++) {
+
+		cell = hash_get_nth_cell(table, i);
+
+		if (cell->node) {
+
+			cells++;
+		}
+	}
+#endif /* PRINT_USED_CELLS */
+
+	ib_logger(ib_stream, "Hash table size %lu",
+		(ulong) hash_get_n_cells(table));
+
+#ifdef PRINT_USED_CELLS
+	ib_logger(ib_stream, ", used cells %lu", (ulong) cells);
+#endif /* PRINT_USED_CELLS */
+
+	if (table->heaps == NULL && table->heap != NULL) {
+
+		/* This calculation is intended for the adaptive hash
+		index: how many buffer frames we have reserved? */
+
+		n_bufs = UT_LIST_GET_LEN(table->heap->base) - 1;
+
+		if (table->heap->free_block) {
+			n_bufs++;
+		}
+
+		ib_logger(ib_stream, ", node heap has %lu buffer(s)\n",
+			(ulong) n_bufs);
+	}
+}
+#endif /* !UNIV_HOTBACKUP */
+/*****************************************************************************
+
+Copyright (c) 2007, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file ha/ha0storage.c
+Hash storage.
+Provides a data structure that stores chunks of data in
+its own storage, avoiding duplicates.
+
+Created September 22, 2007 Vasil Dimov
+*******************************************************/
+
+#include "univ.i"
+#include "ha0storage.h"
+#include "hash0hash.h"
+#include "mem0mem.h"
+#include "ut0rnd.h"
+
+#ifdef UNIV_NONINL
+#include "ha0storage.ic"
+#endif
+
+/*******************************************************************//**
+Retrieves a data from a storage. If it is present, a pointer to the
+stored copy of data is returned, otherwise NULL is returned. */
+UNIV_STATIC
+const void*
+ha_storage_get(
+/*===========*/
+	ha_storage_t*	storage,	/*!< in: hash storage */
+	const void*	data,		/*!< in: data to check for */
+	ulint		data_len)	/*!< in: data length */
+{
+	ha_storage_node_t*	node;
+	ulint			fold;
+
+	/* avoid repetitive calls to ut_fold_binary() in the HASH_SEARCH
+	macro */
+	fold = ut_fold_binary(data, data_len);
+
+#define IS_FOUND	\
+	node->data_len == data_len && memcmp(node->data, data, data_len) == 0
+
+	HASH_SEARCH(
+		next,			/* node->"next" */
+		storage->hash,		/* the hash table */
+		fold,			/* key */
+		ha_storage_node_t*,	/* type of node->next */
+		node,			/* auxiliary variable */
+		,			/* assertion */
+		IS_FOUND);		/* search criteria */
+
+	if (node == NULL) {
+
+		return(NULL);
+	}
+	/* else */
+
+	return(node->data);
+}
+
+/*******************************************************************//**
+Copies data into the storage and returns a pointer to the copy. If the
+same data chunk is already present, then pointer to it is returned.
+Data chunks are considered to be equal if len1 == len2 and
+memcmp(data1, data2, len1) == 0. If "data" is not present (and thus
+data_len bytes need to be allocated) and the size of storage is going to
+become more than "memlim" then "data" is not added and NULL is returned.
+To disable this behavior "memlim" can be set to 0, which stands for
+"no limit". */
+UNIV_INTERN
+const void*
+ha_storage_put_memlim(
+/*==================*/
+	ha_storage_t*	storage,	/*!< in/out: hash storage */
+	const void*	data,		/*!< in: data to store */
+	ulint		data_len,	/*!< in: data length */
+	ulint		memlim)		/*!< in: memory limit to obey */
+{
+	void*			raw;
+	ha_storage_node_t*	node;
+	const void*		data_copy;
+	ulint			fold;
+
+	/* check if data chunk is already present */
+	data_copy = ha_storage_get(storage, data, data_len);
+	if (data_copy != NULL) {
+
+		return(data_copy);
+	}
+
+	/* not present */
+
+	/* check if we are allowed to allocate data_len bytes */
+	if (memlim > 0
+	    && ha_storage_get_size(storage) + data_len > memlim) {
+
+		return(NULL);
+	}
+
+	/* we put the auxiliary node struct and the data itself in one
+	continuous block */
+	raw = mem_heap_alloc(storage->heap,
+			     sizeof(ha_storage_node_t) + data_len);
+
+	node = (ha_storage_node_t*) raw;
+	data_copy = (byte*) raw + sizeof(*node);
+
+	memcpy((byte*) raw + sizeof(*node), data, data_len);
+
+	node->data_len = data_len;
+	node->data = data_copy;
+
+	/* avoid repetitive calls to ut_fold_binary() in the HASH_INSERT
+	macro */
+	fold = ut_fold_binary(data, data_len);
+
+	HASH_INSERT(
+		ha_storage_node_t,	/* type used in the hash chain */
+		next,			/* node->"next" */
+		storage->hash,		/* the hash table */
+		fold,			/* key */
+		node);			/* add this data to the hash */
+
+	/* the output should not be changed because it will spoil the
+	hash table */
+	return(data_copy);
+}
+
+#ifdef UNIV_COMPILE_TEST_FUNCS
+
+void
+test_ha_storage()
+{
+	ha_storage_t*	storage;
+	char		buf[1024];
+	int		i;
+	const void*	stored[256];
+	const void*	p;
+
+	storage = ha_storage_create(0, 0);
+
+	for (i = 0; i < 256; i++) {
+
+		memset(buf, i, sizeof(buf));
+		stored[i] = ha_storage_put(storage, buf, sizeof(buf));
+	}
+
+	//ha_storage_empty(&storage);
+
+	for (i = 255; i >= 0; i--) {
+
+		memset(buf, i, sizeof(buf));
+		p = ha_storage_put(storage, buf, sizeof(buf));
+
+		if (p != stored[i]) {
+
+			ib_logger(ib_stream, "ha_storage_put() returned %p "
+				"instead of %p, i=%d\n", p, stored[i], i);
+			return;
+		}
+	}
+
+	ib_logger(ib_stream, "all ok\n");
+
+	ha_storage_free(storage);
+}
+
+#endif /* UNIV_COMPILE_TEST_FUNCS */
+/*****************************************************************************
+
+Copyright (c) 1997, 2009, Innobase Oy. All Rights Reserved.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/**************************************************//**
+@file ha/hash0hash.c
+The simple hash table utility
+
+Created 5/20/1997 Heikki Tuuri
+*******************************************************/
+
+#include "hash0hash.h"
+#ifdef UNIV_NONINL
+#include "hash0hash.ic"
+#endif
+
+#include "mem0mem.h"
+
+#ifndef UNIV_HOTBACKUP
+/************************************************************//**
+Reserves the mutex for a fold value in a hash table. */
+UNIV_INTERN
+void
+hash_mutex_enter(
+/*=============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold)	/*!< in: fold */
+{
+	mutex_enter(hash_get_mutex(table, fold));
+}
+
+/************************************************************//**
+Releases the mutex for a fold value in a hash table. */
+UNIV_INTERN
+void
+hash_mutex_exit(
+/*============*/
+	hash_table_t*	table,	/*!< in: hash table */
+	ulint		fold)	/*!< in: fold */
+{
+	mutex_exit(hash_get_mutex(table, fold));
+}
+
+/************************************************************//**
+Reserves all the mutexes of a hash table, in an ascending order. */
+UNIV_INTERN
+void
+hash_mutex_enter_all(
+/*=================*/
+	hash_table_t*	table)	/*!< in: hash table */
+{
+	ulint	i;
+
+	for (i = 0; i < table->n_mutexes; i++) {
+
+		mutex_enter(table->mutexes + i);
+	}
+}
+
+/************************************************************//**
+Releases all the mutexes of a hash table. */
+UNIV_INTERN
+void
+hash_mutex_exit_all(
+/*================*/
+	hash_table_t*	table)	/*!< in: hash table */
+{
+	ulint	i;
+
+	for (i = 0; i < table->n_mutexes; i++) {
+
+		mutex_exit(table->mutexes + i);
+	}
+}
+#endif /* !UNIV_HOTBACKUP */
+
+/*************************************************************//**
+Creates a hash table with >= n array cells. The actual number of cells is
+chosen to be a prime number slightly bigger than n.
+@return	own: created table */
+UNIV_INTERN
+hash_table_t*
+hash_create(
+/*========*/
+	ulint	n)	/*!< in: number of array cells */
+{
+	hash_cell_t*	array;
+	ulint		prime;
+	hash_table_t*	table;
+
+	prime = ut_find_prime(n);
+
+	table = mem_alloc(sizeof(hash_table_t));
+
+	array = ut_malloc(sizeof(hash_cell_t) * prime);
+
+	table->array = array;
+	table->n_cells = prime;
+#ifndef UNIV_HOTBACKUP
+# if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	table->adaptive = FALSE;
+# endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	table->n_mutexes = 0;
+	table->mutexes = NULL;
+	table->heaps = NULL;
+#endif /* !UNIV_HOTBACKUP */
+	table->heap = NULL;
+	table->magic_n = HASH_TABLE_MAGIC_N;
+
+	/* Initialize the cell array */
+	hash_table_clear(table);
+
+	return(table);
+}
+
+/*************************************************************//**
+Frees a hash table. */
+UNIV_INTERN
+void
+hash_table_free(
+/*============*/
+	hash_table_t*	table)	/*!< in, own: hash table */
+{
+#ifndef UNIV_HOTBACKUP
+	ut_a(table->mutexes == NULL);
+#endif /* !UNIV_HOTBACKUP */
+
+	ut_free(table->array);
+	mem_free(table);
+}
+
+#ifndef UNIV_HOTBACKUP
+/*************************************************************//**
+Creates a mutex array to protect a hash table. */
+UNIV_INTERN
+void
+hash_create_mutexes_func(
+/*=====================*/
+	hash_table_t*	table,		/*!< in: hash table */
+#ifdef UNIV_SYNC_DEBUG
+	ulint		sync_level,	/*!< in: latching order level of the
+					mutexes: used in the debug version */
+#endif /* UNIV_SYNC_DEBUG */
+	ulint		n_mutexes)	/*!< in: number of mutexes, must be a
+					power of 2 */
+{
+	ulint	i;
+
+	ut_a(n_mutexes > 0);
+	ut_a(ut_is_2pow(n_mutexes));
+
+	table->mutexes = mem_alloc(n_mutexes * sizeof(mutex_t));
+
+	for (i = 0; i < n_mutexes; i++) {
+		mutex_create(table->mutexes + i, sync_level);
+	}
+
+	table->n_mutexes = n_mutexes;
+}
+
+/*****************************************************************
+Frees a mutex array created with hash_create_mutexes_func(). */
+UNIV_INTERN
+void
+hash_free_mutexes_func(
+/*===================*/
+	hash_table_t*	table)		/*!< in,own: hash table */
+{
+	ulint	i;
+
+	for (i = 0; i < table->n_mutexes; i++) {
+		mutex_free(&table->mutexes[i]);
+#ifdef UNIV_DEBUG
+		memset(&table->mutexes[i], 0x0, sizeof(table->mutexes[i]));
+#endif
+	}
+
+	mem_free(table->mutexes);
+}
+#endif /* !UNIV_HOTBACKUP */
+/*****************************************************************************
+
+Copyright (c) 1996, 2009, Innobase Oy. All Rights Reserved.
+Copyright (c) 2008, Google Inc.
+
+Portions of this file contain modifications contributed and copyrighted by
+Google, Inc. Those modifications are gratefully acknowledged and are described
+briefly in the InnoDB documentation. The contributions by Google are
+incorporated with their permission, and subject to the conditions contained in
+the file COPYING.Google.
+
+This program is free software; you can redistribute it and/or modify it under
+the terms of the GNU General Public License as published by the Free Software
+Foundation; version 2 of the License.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
+FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License along with
+this program; if not, write to the Free Software Foundation, Inc., 59 Temple
+Place, Suite 330, Boston, MA 02111-1307 USA
+
+*****************************************************************************/
+
+/********************************************************************//**
+@file btr/btr0sea.c
+The index tree adaptive search
+
+Created 2/17/1996 Heikki Tuuri
+*************************************************************************/
+
+#include "btr0sea.h"
+#ifdef UNIV_NONINL
+#include "btr0sea.ic"
+#endif
+
+#include "buf0buf.h"
+#include "page0page.h"
+#include "page0cur.h"
+#include "btr0cur.h"
+#include "btr0pcur.h"
+#include "btr0btr.h"
+#include "ha0ha.h"
+
+/** Flag: has the search system been enabled?
+Protected by btr_search_latch and btr_search_enabled_mutex. */
+UNIV_INTERN char		btr_search_enabled	= TRUE;
+
+/** Mutex protecting btr_search_enabled */
+UNIV_STATIC mutex_t			btr_search_enabled_mutex;
+
+/** A dummy variable to fool the compiler */
+UNIV_INTERN ulint		btr_search_this_is_zero = 0;
+
+#ifdef UNIV_SEARCH_PERF_STAT
+/** Number of successful adaptive hash index lookups */
+UNIV_INTERN ulint		btr_search_n_succ	= 0;
+/** Number of failed adaptive hash index lookups */
+UNIV_INTERN ulint		btr_search_n_hash_fail	= 0;
+#endif /* UNIV_SEARCH_PERF_STAT */
+
+/** padding to prevent other memory update
+hotspots from residing on the same memory
+cache line as btr_search_latch */
+UNIV_INTERN byte		btr_sea_pad1[64];
+
+/** The latch protecting the adaptive search system: this latch protects the
+(1) positions of records on those pages where a hash index has been built.
+NOTE: It does not protect values of non-ordering fields within a record from
+being updated in-place! We can use fact (1) to perform unique searches to
+indexes. */
+
+/* We will allocate the latch from dynamic memory to get it to the
+same DRAM page as other hotspot semaphores */
+UNIV_INTERN rw_lock_t*		btr_search_latch_temp;
+
+/** padding to prevent other memory update hotspots from residing on
+the same memory cache line */
+UNIV_INTERN byte		btr_sea_pad2[64];
+
+/** The adaptive hash index */
+UNIV_INTERN btr_search_sys_t*	btr_search_sys;
+
+/** If the number of records on the page divided by this parameter
+would have been successfully accessed using a hash index, the index
+is then built on the page, assuming the global limit has been reached */
+#define BTR_SEARCH_PAGE_BUILD_LIMIT	16
+
+/** The global limit for consecutive potentially successful hash searches,
+before hash index building is started */
+#define BTR_SEARCH_BUILD_LIMIT		100
+
+/********************************************************************//**
+Builds a hash index on a page with the given parameters. If the page already
+has a hash index with different parameters, the old hash index is removed.
+If index is non-NULL, this function checks if n_fields and n_bytes are
+sensible values, and does not build a hash index if not. */
+UNIV_STATIC
+void
+btr_search_build_page_hash_index(
+/*=============================*/
+	dict_index_t*	index,	/*!< in: index for which to build, or NULL if
+				not known */
+	buf_block_t*	block,	/*!< in: index page, s- or x-latched */
+	ulint		n_fields,/*!< in: hash this many full fields */
+	ulint		n_bytes,/*!< in: hash this many bytes from the next
+				field */
+	ibool		left_side);/*!< in: hash for searches from left side? */
+
+/*****************************************************************//**
+This function should be called before reserving any btr search mutex, if
+the intended operation might add nodes to the search system hash table.
+Because of the latching order, once we have reserved the btr search system
+latch, we cannot allocate a free frame from the buffer pool. Checks that
+there is a free buffer frame allocated for hash table heap in the btr search
+system. If not, allocates a free frames for the heap. This check makes it
+probable that, when have reserved the btr search system latch and we need to
+allocate a new node to the hash table, it will succeed. However, the check
+will not guarantee success. */
+UNIV_STATIC
+void
+btr_search_check_free_space_in_heap(void)
+/*=====================================*/
+{
+	hash_table_t*	table;
+	mem_heap_t*	heap;
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_SHARED));
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	table = btr_search_sys->hash_index;
+
+	heap = table->heap;
+
+	/* Note that we peek the value of heap->free_block without reserving
+	the latch: this is ok, because we will not guarantee that there will
+	be enough free space in the hash table. */
+
+	if (heap->free_block == NULL) {
+		buf_block_t*	block = buf_block_alloc(0);
+
+		rw_lock_x_lock(&btr_search_latch);
+
+		if (heap->free_block == NULL) {
+			heap->free_block = block;
+		} else {
+			buf_block_free(block);
+		}
+
+		rw_lock_x_unlock(&btr_search_latch);
+	}
+}
+
+/*****************************************************************//**
+Reset global configuration variables. */
+UNIV_INTERN
+void
+btr_search_var_init(void)
+/*=====================*/
+{
+	btr_search_this_is_zero = 0;
+
+#ifdef UNIV_SEARCH_PERF_STAT
+	btr_search_n_succ	= 0;
+	btr_search_n_hash_fail	= 0;
+#endif /* UNIV_SEARCH_PERF_STAT */
+
+	btr_search_latch_temp 	= NULL;
+
+	btr_search_sys 		= NULL;
+}
+
+/*********************************************************************
+Creates and initializes the adaptive search system at a database start. */
+UNIV_INTERN
+void
+btr_search_sys_create(
+/*==================*/
+	ulint	hash_size)	/*!< in: hash index hash table size */
+{
+	/* We allocate the search latch from dynamic memory:
+	see above at the global variable definition */
+
+	btr_search_latch_temp = mem_alloc(sizeof(rw_lock_t));
+
+	rw_lock_create(&btr_search_latch, SYNC_SEARCH_SYS);
+	mutex_create(&btr_search_enabled_mutex, SYNC_SEARCH_SYS_CONF);
+
+	btr_search_sys = mem_alloc(sizeof(btr_search_sys_t));
+
+	btr_search_sys->hash_index = ha_create(hash_size, 0, 0);
+}
+
+/*********************************************************************
+Closes the adaptive search system at a database shutdown. */
+UNIV_INTERN
+void
+btr_search_sys_close(void)
+/*======================*/
+{
+	/* This can happen if we abort during the startup phase. */
+	if (btr_search_sys == NULL) {
+		return;
+	}
+
+	mem_heap_free(btr_search_sys->hash_index->heap);
+	hash_table_free(btr_search_sys->hash_index);
+
+	rw_lock_free(&btr_search_latch);
+	mutex_free(&btr_search_enabled_mutex);
+
+	memset(&btr_search_enabled_mutex,
+		0x0, sizeof(btr_search_enabled_mutex));
+
+	mem_free(btr_search_latch_temp);
+	btr_search_latch_temp = NULL;
+
+	mem_free(btr_search_sys);
+	btr_search_sys = NULL;
+}
+
+/************************************************************************
+Disable the adaptive hash search system and empty the index. */
+UNIV_INTERN
+void
+btr_search_disable(void)
+/*====================*/
+{
+	mutex_enter(&btr_search_enabled_mutex);
+	rw_lock_x_lock(&btr_search_latch);
+
+	btr_search_enabled = FALSE;
+
+	/* Clear all block->is_hashed flags and remove all entries
+	from btr_search_sys->hash_index. */
+	buf_pool_drop_hash_index();
+
+	/* btr_search_enabled_mutex should guarantee this. */
+	ut_ad(!btr_search_enabled);
+
+	rw_lock_x_unlock(&btr_search_latch);
+	mutex_exit(&btr_search_enabled_mutex);
+}
+
+/********************************************************************//**
+Enable the adaptive hash search system. */
+UNIV_INTERN
+void
+btr_search_enable(void)
+/*====================*/
+{
+	mutex_enter(&btr_search_enabled_mutex);
+	rw_lock_x_lock(&btr_search_latch);
+
+	btr_search_enabled = TRUE;
+
+	rw_lock_x_unlock(&btr_search_latch);
+	mutex_exit(&btr_search_enabled_mutex);
+}
+
+/*****************************************************************//**
+Creates and initializes a search info struct.
+@return	own: search info struct */
+UNIV_INTERN
+btr_search_t*
+btr_search_info_create(
+/*===================*/
+	mem_heap_t*	heap)	/*!< in: heap where created */
+{
+	btr_search_t*	info;
+
+	info = mem_heap_alloc(heap, sizeof(btr_search_t));
+
+#ifdef UNIV_DEBUG
+	info->magic_n = BTR_SEARCH_MAGIC_N;
+#endif /* UNIV_DEBUG */
+
+	info->ref_count = 0;
+	info->root_guess = NULL;
+
+	info->hash_analysis = 0;
+	info->n_hash_potential = 0;
+
+	info->last_hash_succ = FALSE;
+
+#ifdef UNIV_SEARCH_PERF_STAT
+	info->n_hash_succ = 0;
+	info->n_hash_fail = 0;
+	info->n_patt_succ = 0;
+	info->n_searches = 0;
+#endif /* UNIV_SEARCH_PERF_STAT */
+
+	/* Set some sensible values */
+	info->n_fields = 1;
+	info->n_bytes = 0;
+
+	info->left_side = TRUE;
+
+	return(info);
+}
+
+/*****************************************************************//**
+Returns the value of ref_count. The value is protected by
+btr_search_latch.
+@return	ref_count value. */
+UNIV_INTERN
+ulint
+btr_search_info_get_ref_count(
+/*==========================*/
+	btr_search_t*   info)	/*!< in: search info. */
+{
+	ulint ret;
+
+	ut_ad(info);
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_SHARED));
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	rw_lock_s_lock(&btr_search_latch);
+	ret = info->ref_count;
+	rw_lock_s_unlock(&btr_search_latch);
+
+	return(ret);
+}
+
+/*********************************************************************//**
+Updates the search info of an index about hash successes. NOTE that info
+is NOT protected by any semaphore, to save CPU time! Do not assume its fields
+are consistent. */
+UNIV_STATIC
+void
+btr_search_info_update_hash(
+/*========================*/
+	btr_search_t*	info,	/*!< in/out: search info */
+	btr_cur_t*	cursor)	/*!< in: cursor which was just positioned */
+{
+	dict_index_t*	index;
+	ulint		n_unique;
+	int		cmp;
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_SHARED));
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	index = cursor->index;
+
+	if (dict_index_is_ibuf(index)) {
+		/* So many deletes are performed on an insert buffer tree
+		that we do not consider a hash index useful on it: */
+
+		return;
+	}
+
+	n_unique = dict_index_get_n_unique_in_tree(index);
+
+	if (info->n_hash_potential == 0) {
+
+		goto set_new_recomm;
+	}
+
+	/* Test if the search would have succeeded using the recommended
+	hash prefix */
+
+	if (info->n_fields >= n_unique && cursor->up_match >= n_unique) {
+increment_potential:
+		info->n_hash_potential++;
+
+		return;
+	}
+
+	cmp = ut_pair_cmp(info->n_fields, info->n_bytes,
+			  cursor->low_match, cursor->low_bytes);
+
+	if (info->left_side ? cmp <= 0 : cmp > 0) {
+
+		goto set_new_recomm;
+	}
+
+	cmp = ut_pair_cmp(info->n_fields, info->n_bytes,
+			  cursor->up_match, cursor->up_bytes);
+
+	if (info->left_side ? cmp <= 0 : cmp > 0) {
+
+		goto increment_potential;
+	}
+
+set_new_recomm:
+	/* We have to set a new recommendation; skip the hash analysis
+	for a while to avoid unnecessary CPU time usage when there is no
+	chance for success */
+
+	info->hash_analysis = 0;
+
+	cmp = ut_pair_cmp(cursor->up_match, cursor->up_bytes,
+			  cursor->low_match, cursor->low_bytes);
+	if (cmp == 0) {
+		info->n_hash_potential = 0;
+
+		/* For extra safety, we set some sensible values here */
+
+		info->n_fields = 1;
+		info->n_bytes = 0;
+
+		info->left_side = TRUE;
+
+	} else if (cmp > 0) {
+		info->n_hash_potential = 1;
+
+		if (cursor->up_match >= n_unique) {
+
+			info->n_fields = n_unique;
+			info->n_bytes = 0;
+
+		} else if (cursor->low_match < cursor->up_match) {
+
+			info->n_fields = cursor->low_match + 1;
+			info->n_bytes = 0;
+		} else {
+			info->n_fields = cursor->low_match;
+			info->n_bytes = cursor->low_bytes + 1;
+		}
+
+		info->left_side = TRUE;
+	} else {
+		info->n_hash_potential = 1;
+
+		if (cursor->low_match >= n_unique) {
+
+			info->n_fields = n_unique;
+			info->n_bytes = 0;
+
+		} else if (cursor->low_match > cursor->up_match) {
+
+			info->n_fields = cursor->up_match + 1;
+			info->n_bytes = 0;
+		} else {
+			info->n_fields = cursor->up_match;
+			info->n_bytes = cursor->up_bytes + 1;
+		}
+
+		info->left_side = FALSE;
+	}
+}
+
+/*********************************************************************//**
+Updates the block search info on hash successes. NOTE that info and
+block->n_hash_helps, n_fields, n_bytes, side are NOT protected by any
+semaphore, to save CPU time! Do not assume the fields are consistent.
+@return	TRUE if building a (new) hash index on the block is recommended */
+UNIV_STATIC
+ibool
+btr_search_update_block_hash_info(
+/*==============================*/
+	btr_search_t*	info,	/*!< in: search info */
+	buf_block_t*	block,	/*!< in: buffer block */
+	btr_cur_t*	cursor __attribute__((unused)))
+				/*!< in: cursor */
+{
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_SHARED));
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+	ut_ad(rw_lock_own(&block->lock, RW_LOCK_SHARED)
+	      || rw_lock_own(&block->lock, RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+	ut_ad(cursor);
+
+	info->last_hash_succ = FALSE;
+
+	ut_a(buf_block_state_valid(block));
+	ut_ad(info->magic_n == BTR_SEARCH_MAGIC_N);
+
+	if ((block->n_hash_helps > 0)
+	    && (info->n_hash_potential > 0)
+	    && (block->n_fields == info->n_fields)
+	    && (block->n_bytes == info->n_bytes)
+	    && (block->left_side == info->left_side)) {
+
+		if ((block->is_hashed)
+		    && (block->curr_n_fields == info->n_fields)
+		    && (block->curr_n_bytes == info->n_bytes)
+		    && (block->curr_left_side == info->left_side)) {
+
+			/* The search would presumably have succeeded using
+			the hash index */
+
+			info->last_hash_succ = TRUE;
+		}
+
+		block->n_hash_helps++;
+	} else {
+		block->n_hash_helps = 1;
+		block->n_fields = info->n_fields;
+		block->n_bytes = info->n_bytes;
+		block->left_side = info->left_side;
+	}
+
+#ifdef UNIV_DEBUG
+	if (cursor->index->table->does_not_fit_in_memory) {
+		block->n_hash_helps = 0;
+	}
+#endif /* UNIV_DEBUG */
+
+	if ((block->n_hash_helps > page_get_n_recs(block->frame)
+	     / BTR_SEARCH_PAGE_BUILD_LIMIT)
+	    && (info->n_hash_potential >= BTR_SEARCH_BUILD_LIMIT)) {
+
+		if ((!block->is_hashed)
+		    || (block->n_hash_helps
+			> 2 * page_get_n_recs(block->frame))
+		    || (block->n_fields != block->curr_n_fields)
+		    || (block->n_bytes != block->curr_n_bytes)
+		    || (block->left_side != block->curr_left_side)) {
+
+			/* Build a new hash index on the page */
+
+			return(TRUE);
+		}
+	}
+
+	return(FALSE);
+}
+
+/*********************************************************************//**
+Updates a hash node reference when it has been unsuccessfully used in a
+search which could have succeeded with the used hash parameters. This can
+happen because when building a hash index for a page, we do not check
+what happens at page boundaries, and therefore there can be misleading
+hash nodes. Also, collisions in the fold value can lead to misleading
+references. This function lazily fixes these imperfections in the hash
+index. */
+UNIV_STATIC
+void
+btr_search_update_hash_ref(
+/*=======================*/
+	btr_search_t*	info,	/*!< in: search info */
+	buf_block_t*	block,	/*!< in: buffer block where cursor positioned */
+	btr_cur_t*	cursor)	/*!< in: cursor */
+{
+	ulint	fold;
+	rec_t*	rec;
+	dulint	index_id;
+
+	ut_ad(cursor->flag == BTR_CUR_HASH_FAIL);
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+	ut_ad(rw_lock_own(&(block->lock), RW_LOCK_SHARED)
+	      || rw_lock_own(&(block->lock), RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+	ut_ad(page_align(btr_cur_get_rec(cursor))
+	      == buf_block_get_frame(block));
+
+	if (!block->is_hashed) {
+
+		return;
+	}
+
+	ut_a(block->index == cursor->index);
+	ut_a(!dict_index_is_ibuf(cursor->index));
+
+	if ((info->n_hash_potential > 0)
+	    && (block->curr_n_fields == info->n_fields)
+	    && (block->curr_n_bytes == info->n_bytes)
+	    && (block->curr_left_side == info->left_side)) {
+		mem_heap_t*	heap		= NULL;
+		ulint		offsets_[REC_OFFS_NORMAL_SIZE];
+		rec_offs_init(offsets_);
+
+		rec = btr_cur_get_rec(cursor);
+
+		if (!page_rec_is_user_rec(rec)) {
+
+			return;
+		}
+
+		index_id = cursor->index->id;
+		fold = rec_fold(rec,
+				rec_get_offsets(rec, cursor->index, offsets_,
+						ULINT_UNDEFINED, &heap),
+				block->curr_n_fields,
+				block->curr_n_bytes, index_id);
+		if (UNIV_LIKELY_NULL(heap)) {
+			mem_heap_free(heap);
+		}
+#ifdef UNIV_SYNC_DEBUG
+		ut_ad(rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+		ha_insert_for_fold(btr_search_sys->hash_index, fold,
+				   block, rec);
+	}
+}
+
+/*********************************************************************//**
+Updates the search info. */
+UNIV_INTERN
+void
+btr_search_info_update_slow(
+/*========================*/
+	btr_search_t*	info,	/*!< in/out: search info */
+	btr_cur_t*	cursor)	/*!< in: cursor which was just positioned */
+{
+	buf_block_t*	block;
+	ibool		build_index;
+	ulint*		params;
+	ulint*		params2;
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_SHARED));
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	block = btr_cur_get_block(cursor);
+
+	/* NOTE that the following two function calls do NOT protect
+	info or block->n_fields etc. with any semaphore, to save CPU time!
+	We cannot assume the fields are consistent when we return from
+	those functions! */
+
+	btr_search_info_update_hash(info, cursor);
+
+	build_index = btr_search_update_block_hash_info(info, block, cursor);
+
+	if (build_index || (cursor->flag == BTR_CUR_HASH_FAIL)) {
+
+		btr_search_check_free_space_in_heap();
+	}
+
+	if (cursor->flag == BTR_CUR_HASH_FAIL) {
+		/* Update the hash node reference, if appropriate */
+
+#ifdef UNIV_SEARCH_PERF_STAT
+		btr_search_n_hash_fail++;
+#endif /* UNIV_SEARCH_PERF_STAT */
+
+		rw_lock_x_lock(&btr_search_latch);
+
+		btr_search_update_hash_ref(info, block, cursor);
+
+		rw_lock_x_unlock(&btr_search_latch);
+	}
+
+	if (build_index) {
+		/* Note that since we did not protect block->n_fields etc.
+		with any semaphore, the values can be inconsistent. We have
+		to check inside the function call that they make sense. We
+		also malloc an array and store the values there to make sure
+		the compiler does not let the function call parameters change
+		inside the called function. It might be that the compiler
+		would optimize the call just to pass pointers to block. */
+
+		params = mem_alloc(3 * sizeof(ulint));
+		params[0] = block->n_fields;
+		params[1] = block->n_bytes;
+		params[2] = block->left_side;
+
+		/* Make sure the compiler cannot deduce the values and do
+		optimizations */
+
+		params2 = params + btr_search_this_is_zero;
+
+		btr_search_build_page_hash_index(cursor->index,
+						 block,
+						 params2[0],
+						 params2[1],
+						 params2[2]);
+		mem_free(params);
+	}
+}
+
+/******************************************************************//**
+Checks if a guessed position for a tree cursor is right. Note that if
+mode is PAGE_CUR_LE, which is used in inserts, and the function returns
+TRUE, then cursor->up_match and cursor->low_match both have sensible values.
+@return	TRUE if success */
+UNIV_STATIC
+ibool
+btr_search_check_guess(
+/*===================*/
+	btr_cur_t*	cursor,	/*!< in: guessed cursor position */
+	ibool		can_only_compare_to_cursor_rec,
+				/*!< in: if we do not have a latch on the page
+				of cursor, but only a latch on
+				btr_search_latch, then ONLY the columns
+				of the record UNDER the cursor are
+				protected, not the next or previous record
+				in the chain: we cannot look at the next or
+				previous record to check our guess! */
+	const dtuple_t*	tuple,	/*!< in: data tuple */
+	ulint		mode,	/*!< in: PAGE_CUR_L, PAGE_CUR_LE, PAGE_CUR_G,
+				or PAGE_CUR_GE */
+	mtr_t*		mtr)	/*!< in: mtr */
+{
+	rec_t*		rec;
+	ulint		n_unique;
+	ulint		match;
+	ulint		bytes;
+	int		cmp;
+	mem_heap_t*	heap		= NULL;
+	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
+	ulint*		offsets		= offsets_;
+	ibool		success		= FALSE;
+	rec_offs_init(offsets_);
+
+	n_unique = dict_index_get_n_unique_in_tree(cursor->index);
+
+	rec = btr_cur_get_rec(cursor);
+
+	ut_ad(page_rec_is_user_rec(rec));
+
+	match = 0;
+	bytes = 0;
+
+	offsets = rec_get_offsets(rec, cursor->index, offsets,
+				  n_unique, &heap);
+
+	cmp = page_cmp_dtuple_rec_with_match(
+		cursor->index->cmp_ctx, tuple, rec, offsets, &match, &bytes);
+
+	if (mode == PAGE_CUR_GE) {
+		if (cmp == 1) {
+			goto exit_func;
+		}
+
+		cursor->up_match = match;
+
+		if (match >= n_unique) {
+			success = TRUE;
+			goto exit_func;
+		}
+	} else if (mode == PAGE_CUR_LE) {
+		if (cmp == -1) {
+			goto exit_func;
+		}
+
+		cursor->low_match = match;
+
+	} else if (mode == PAGE_CUR_G) {
+		if (cmp != -1) {
+			goto exit_func;
+		}
+	} else if (mode == PAGE_CUR_L) {
+		if (cmp != 1) {
+			goto exit_func;
+		}
+	}
+
+	if (can_only_compare_to_cursor_rec) {
+		/* Since we could not determine if our guess is right just by
+		looking at the record under the cursor, return FALSE */
+		goto exit_func;
+	}
+
+	match = 0;
+	bytes = 0;
+
+	if ((mode == PAGE_CUR_G) || (mode == PAGE_CUR_GE)) {
+		rec_t*	prev_rec;
+
+		ut_ad(!page_rec_is_infimum(rec));
+
+		prev_rec = page_rec_get_prev(rec);
+
+		if (page_rec_is_infimum(prev_rec)) {
+			success = btr_page_get_prev(page_align(prev_rec), mtr)
+				== FIL_NULL;
+
+			goto exit_func;
+		}
+
+		offsets = rec_get_offsets(prev_rec, cursor->index, offsets,
+					  n_unique, &heap);
+		cmp = page_cmp_dtuple_rec_with_match(
+			cursor->index->cmp_ctx,
+			tuple, prev_rec, offsets, &match, &bytes);
+
+		if (mode == PAGE_CUR_GE) {
+			success = cmp == 1;
+		} else {
+			success = cmp != -1;
+		}
+
+		goto exit_func;
+	} else {
+		rec_t*	next_rec;
+
+		ut_ad(!page_rec_is_supremum(rec));
+
+		next_rec = page_rec_get_next(rec);
+
+		if (page_rec_is_supremum(next_rec)) {
+			if (btr_page_get_next(page_align(next_rec), mtr)
+			    == FIL_NULL) {
+
+				cursor->up_match = 0;
+				success = TRUE;
+			}
+
+			goto exit_func;
+		}
+
+		offsets = rec_get_offsets(next_rec, cursor->index, offsets,
+					  n_unique, &heap);
+		cmp = page_cmp_dtuple_rec_with_match(
+			cursor->index->cmp_ctx,
+			tuple, next_rec, offsets, &match, &bytes);
+
+		if (mode == PAGE_CUR_LE) {
+			success = cmp == -1;
+			cursor->up_match = match;
+		} else {
+			success = cmp != 1;
+		}
+	}
+exit_func:
+	if (UNIV_LIKELY_NULL(heap)) {
+		mem_heap_free(heap);
+	}
+	return(success);
+}
+
+/******************************************************************//**
+Tries to guess the right search position based on the hash search info
+of the index. Note that if mode is PAGE_CUR_LE, which is used in inserts,
+and the function returns TRUE, then cursor->up_match and cursor->low_match
+both have sensible values.
+@return	TRUE if succeeded */
+UNIV_INTERN
+ibool
+btr_search_guess_on_hash(
+/*=====================*/
+	dict_index_t*	index,		/*!< in: index */
+	btr_search_t*	info,		/*!< in: index search info */
+	const dtuple_t*	tuple,		/*!< in: logical record */
+	ulint		mode,		/*!< in: PAGE_CUR_L, ... */
+	ulint		latch_mode,	/*!< in: BTR_SEARCH_LEAF, ...;
+					NOTE that only if has_search_latch
+					is 0, we will have a latch set on
+					the cursor page, otherwise we assume
+					the caller uses his search latch
+					to protect the record! */
+	btr_cur_t*	cursor,		/*!< out: tree cursor */
+	ulint		has_search_latch,/*!< in: latch mode the caller
+					currently has on btr_search_latch:
+					RW_S_LATCH, RW_X_LATCH, or 0 */
+	mtr_t*		mtr)		/*!< in: mtr */
+{
+	buf_block_t*	block;
+	rec_t*		rec;
+	ulint		fold;
+	dulint		index_id;
+#ifdef notdefined
+	btr_cur_t	cursor2;
+	btr_pcur_t	pcur;
+#endif
+	ut_ad(index && info && tuple && cursor && mtr);
+	ut_ad((latch_mode == BTR_SEARCH_LEAF)
+	      || (latch_mode == BTR_MODIFY_LEAF));
+
+	/* Note that, for efficiency, the struct info may not be protected by
+	any latch here! */
+
+	if (UNIV_UNLIKELY(info->n_hash_potential == 0)) {
+
+		return(FALSE);
+	}
+
+	cursor->n_fields = info->n_fields;
+	cursor->n_bytes = info->n_bytes;
+
+	if (UNIV_UNLIKELY(dtuple_get_n_fields(tuple)
+			  < cursor->n_fields + (cursor->n_bytes > 0))) {
+
+		return(FALSE);
+	}
+
+	index_id = index->id;
+
+#ifdef UNIV_SEARCH_PERF_STAT
+	info->n_hash_succ++;
+#endif
+	fold = dtuple_fold(tuple, cursor->n_fields, cursor->n_bytes, index_id);
+
+	cursor->fold = fold;
+	cursor->flag = BTR_CUR_HASH;
+
+	if (UNIV_LIKELY(!has_search_latch)) {
+		rw_lock_s_lock(&btr_search_latch);
+
+		if (UNIV_UNLIKELY(!btr_search_enabled)) {
+			goto failure_unlock;
+		}
+	}
+
+	ut_ad(rw_lock_get_writer(&btr_search_latch) != RW_LOCK_EX);
+	ut_ad(rw_lock_get_reader_count(&btr_search_latch) > 0);
+
+	rec = ha_search_and_get_data(btr_search_sys->hash_index, fold);
+
+	if (UNIV_UNLIKELY(!rec)) {
+		goto failure_unlock;
+	}
+
+	block = buf_block_align(rec);
+
+	if (UNIV_LIKELY(!has_search_latch)) {
+
+		if (UNIV_UNLIKELY(
+			    !buf_page_get_known_nowait(latch_mode, block,
+						       BUF_MAKE_YOUNG,
+						       __FILE__, __LINE__,
+						       mtr))) {
+			goto failure_unlock;
+		}
+
+		rw_lock_s_unlock(&btr_search_latch);
+
+		buf_block_dbg_add_level(block, SYNC_TREE_NODE_FROM_HASH);
+	}
+
+	if (UNIV_UNLIKELY(buf_block_get_state(block) != BUF_BLOCK_FILE_PAGE)) {
+		ut_ad(buf_block_get_state(block) == BUF_BLOCK_REMOVE_HASH);
+
+		if (UNIV_LIKELY(!has_search_latch)) {
+
+			btr_leaf_page_release(block, latch_mode, mtr);
+		}
+
+		goto failure;
+	}
+
+	ut_ad(page_rec_is_user_rec(rec));
+
+	btr_cur_position(index, rec, block, cursor);
+
+	/* Check the validity of the guess within the page */
+
+	/* If we only have the latch on btr_search_latch, not on the
+	page, it only protects the columns of the record the cursor
+	is positioned on. We cannot look at the next of the previous
+	record to determine if our guess for the cursor position is
+	right. */
+	if (UNIV_EXPECT
+	    (ut_dulint_cmp(index_id, btr_page_get_index_id(block->frame)), 0)
+	    || !btr_search_check_guess(cursor,
+				       has_search_latch,
+				       tuple, mode, mtr)) {
+		if (UNIV_LIKELY(!has_search_latch)) {
+			btr_leaf_page_release(block, latch_mode, mtr);
+		}
+
+		goto failure;
+	}
+
+	if (UNIV_LIKELY(info->n_hash_potential < BTR_SEARCH_BUILD_LIMIT + 5)) {
+
+		info->n_hash_potential++;
+	}
+
+#ifdef notdefined
+	/* These lines of code can be used in a debug version to check
+	the correctness of the searched cursor position: */
+
+	info->last_hash_succ = FALSE;
+
+	/* Currently, does not work if the following fails: */
+	ut_ad(!has_search_latch);
+
+	btr_leaf_page_release(block, latch_mode, mtr);
+
+	btr_cur_search_to_nth_level(index, 0, tuple, mode, latch_mode,
+				    &cursor2, 0, mtr);
+	if (mode == PAGE_CUR_GE
+	    && page_rec_is_supremum(btr_cur_get_rec(&cursor2))) {
+
+		/* If mode is PAGE_CUR_GE, then the binary search
+		in the index tree may actually take us to the supremum
+		of the previous page */
+
+		info->last_hash_succ = FALSE;
+
+		btr_pcur_open_on_user_rec(index, tuple, mode, latch_mode,
+					  &pcur, mtr);
+		ut_ad(btr_pcur_get_rec(&pcur) == btr_cur_get_rec(cursor));
+	} else {
+		ut_ad(btr_cur_get_rec(&cursor2) == btr_cur_get_rec(cursor));
+	}
+
+	/* NOTE that it is theoretically possible that the above assertions
+	fail if the page of the cursor gets removed from the buffer pool
+	meanwhile! Thus it might not be a bug. */
+#endif
+	info->last_hash_succ = TRUE;
+
+#ifdef UNIV_SEARCH_PERF_STAT
+	btr_search_n_succ++;
+#endif
+	if (UNIV_LIKELY(!has_search_latch)
+	    && buf_page_peek_if_too_old(&block->page)) {
+
+		buf_page_make_young(&block->page);
+	}
+
+	/* Increment the page get statistics though we did not really
+	fix the page: for user info only */
+
+	buf_pool->stat.n_page_gets++;
+
+	return(TRUE);
+
+	/*-------------------------------------------*/
+failure_unlock:
+	if (UNIV_LIKELY(!has_search_latch)) {
+		rw_lock_s_unlock(&btr_search_latch);
+	}
+failure:
+	cursor->flag = BTR_CUR_HASH_FAIL;
+
+#ifdef UNIV_SEARCH_PERF_STAT
+	info->n_hash_fail++;
+
+	if (info->n_hash_succ > 0) {
+		info->n_hash_succ--;
+	}
+#endif
+	info->last_hash_succ = FALSE;
+
+	return(FALSE);
+}
+
+/********************************************************************//**
+Drops a page hash index. */
+UNIV_INTERN
+void
+btr_search_drop_page_hash_index(
+/*============================*/
+	buf_block_t*	block)	/*!< in: block containing index page,
+				s- or x-latched, or an index page
+				for which we know that
+				block->buf_fix_count == 0 */
+{
+	hash_table_t*		table;
+	ulint			n_fields;
+	ulint			n_bytes;
+	const page_t*		page;
+	const rec_t*		rec;
+	ulint			fold;
+	ulint			prev_fold;
+	dulint			index_id;
+	ulint			n_cached;
+	ulint			n_recs;
+	ulint*			folds;
+	ulint			i;
+	mem_heap_t*		heap;
+	const dict_index_t*	index;
+	ulint*			offsets;
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_SHARED));
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+retry:
+	rw_lock_s_lock(&btr_search_latch);
+	page = block->frame;
+
+	if (UNIV_LIKELY(!block->is_hashed)) {
+
+		rw_lock_s_unlock(&btr_search_latch);
+
+		return;
+	}
+
+	table = btr_search_sys->hash_index;
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(rw_lock_own(&(block->lock), RW_LOCK_SHARED)
+	      || rw_lock_own(&(block->lock), RW_LOCK_EX)
+	      || (block->page.buf_fix_count == 0));
+#endif /* UNIV_SYNC_DEBUG */
+
+	n_fields = block->curr_n_fields;
+	n_bytes = block->curr_n_bytes;
+	index = block->index;
+	ut_a(!dict_index_is_ibuf(index));
+
+	/* NOTE: The fields of block must not be accessed after
+	releasing btr_search_latch, as the index page might only
+	be s-latched! */
+
+	rw_lock_s_unlock(&btr_search_latch);
+
+	ut_a(n_fields + n_bytes > 0);
+
+	n_recs = page_get_n_recs(page);
+
+	/* Calculate and cache fold values into an array for fast deletion
+	from the hash index */
+
+	folds = mem_alloc(n_recs * sizeof(ulint));
+
+	n_cached = 0;
+
+	rec = page_get_infimum_rec(page);
+	rec = page_rec_get_next_low(rec, page_is_comp(page));
+
+	index_id = btr_page_get_index_id(page);
+
+	ut_a(0 == ut_dulint_cmp(index_id, index->id));
+
+	prev_fold = 0;
+
+	heap = NULL;
+	offsets = NULL;
+
+	while (!page_rec_is_supremum(rec)) {
+		offsets = rec_get_offsets(rec, index, offsets,
+					  n_fields + (n_bytes > 0), &heap);
+		ut_a(rec_offs_n_fields(offsets) == n_fields + (n_bytes > 0));
+		fold = rec_fold(rec, offsets, n_fields, n_bytes, index_id);
+
+		if (fold == prev_fold && prev_fold != 0) {
+
+			goto next_rec;
+		}
+
+		/* Remove all hash nodes pointing to this page from the
+		hash chain */
+
+		folds[n_cached] = fold;
+		n_cached++;
+next_rec:
+		rec = page_rec_get_next_low(rec, page_rec_is_comp(rec));
+		prev_fold = fold;
+	}
+
+	if (UNIV_LIKELY_NULL(heap)) {
+		mem_heap_free(heap);
+	}
+
+	rw_lock_x_lock(&btr_search_latch);
+
+	if (UNIV_UNLIKELY(!block->is_hashed)) {
+		/* Someone else has meanwhile dropped the hash index */
+
+		goto cleanup;
+	}
+
+	ut_a(block->index == index);
+
+	if (UNIV_UNLIKELY(block->curr_n_fields != n_fields)
+	    || UNIV_UNLIKELY(block->curr_n_bytes != n_bytes)) {
+
+		/* Someone else has meanwhile built a new hash index on the
+		page, with different parameters */
+
+		rw_lock_x_unlock(&btr_search_latch);
+
+		mem_free(folds);
+		goto retry;
+	}
+
+	for (i = 0; i < n_cached; i++) {
+
+		ha_remove_all_nodes_to_page(table, folds[i], page);
+	}
+
+	ut_a(index->search_info->ref_count > 0);
+	index->search_info->ref_count--;
+
+	block->is_hashed = FALSE;
+	block->index = NULL;
+	
+cleanup:
+#if defined UNIV_AHI_DEBUG || defined UNIV_DEBUG
+	if (UNIV_UNLIKELY(block->n_pointers)) {
+		/* Corruption */
+		ut_print_timestamp(ib_stream);
+		ib_logger(ib_stream,
+			"  InnoDB: Corruption of adaptive hash index."
+			" After dropping\n"
+			"InnoDB: the hash index to a page of %s,"
+			" still %lu hash nodes remain.\n",
+			index->name, (ulong) block->n_pointers);
+		rw_lock_x_unlock(&btr_search_latch);
+
+		btr_search_validate();
+	} else {
+		rw_lock_x_unlock(&btr_search_latch);
+	}
+#else /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+	rw_lock_x_unlock(&btr_search_latch);
+#endif /* UNIV_AHI_DEBUG || UNIV_DEBUG */
+
+	mem_free(folds);
+}
+
+/********************************************************************//**
+Drops a page hash index when a page is freed from a fseg to the file system.
+Drops possible hash index if the page happens to be in the buffer pool. */
+UNIV_INTERN
+void
+btr_search_drop_page_hash_when_freed(
+/*=================================*/
+	ulint	space,		/*!< in: space id */
+	ulint	zip_size,	/*!< in: compressed page size in bytes
+				or 0 for uncompressed pages */
+	ulint	page_no)	/*!< in: page number */
+{
+	buf_block_t*	block;
+	mtr_t		mtr;
+
+	if (!buf_page_peek_if_search_hashed(space, page_no)) {
+
+		return;
+	}
+
+	mtr_start(&mtr);
+
+	/* We assume that if the caller has a latch on the page, then the
+	caller has already dropped the hash index for the page, and we never
+	get here. Therefore we can acquire the s-latch to the page without
+	having to fear a deadlock. */
+
+	block = buf_page_get_gen(space, zip_size, page_no, RW_S_LATCH, NULL,
+				BUF_GET_IF_IN_POOL, __FILE__, __LINE__,
+				&mtr);
+	/* Because the buffer pool mutex was released by
+	buf_page_peek_if_search_hashed(), it is possible that the
+	block was removed from the buffer pool by another thread
+	before buf_page_get_gen() got a chance to acquire the buffer
+	pool mutex again.  Thus, we must check for a NULL return. */
+
+	if (UNIV_LIKELY(block != NULL)) {
+
+		buf_block_dbg_add_level(block, SYNC_TREE_NODE_FROM_HASH);
+
+		btr_search_drop_page_hash_index(block);
+	}
+
+	mtr_commit(&mtr);
+}
+
+/********************************************************************//**
+Builds a hash index on a page with the given parameters. If the page already
+has a hash index with different parameters, the old hash index is removed.
+If index is non-NULL, this function checks if n_fields and n_bytes are
+sensible values, and does not build a hash index if not. */
+UNIV_STATIC
+void
+btr_search_build_page_hash_index(
+/*=============================*/
+	dict_index_t*	index,	/*!< in: index for which to build */
+	buf_block_t*	block,	/*!< in: index page, s- or x-latched */
+	ulint		n_fields,/*!< in: hash this many full fields */
+	ulint		n_bytes,/*!< in: hash this many bytes from the next
+				field */
+	ibool		left_side)/*!< in: hash for searches from left side? */
+{
+	hash_table_t*	table;
+	page_t*		page;
+	rec_t*		rec;
+	rec_t*		next_rec;
+	ulint		fold;
+	ulint		next_fold;
+	dulint		index_id;
+	ulint		n_cached;
+	ulint		n_recs;
+	ulint*		folds;
+	rec_t**		recs;
+	ulint		i;
+	mem_heap_t*	heap		= NULL;
+	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
+	ulint*		offsets		= offsets_;
+	rec_offs_init(offsets_);
+
+	ut_ad(index);
+	ut_a(!dict_index_is_ibuf(index));
+
+	table = btr_search_sys->hash_index;
+	page = buf_block_get_frame(block);
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(!rw_lock_own(&btr_search_latch, RW_LOCK_EX));
+	ut_ad(rw_lock_own(&(block->lock), RW_LOCK_SHARED)
+	      || rw_lock_own(&(block->lock), RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	rw_lock_s_lock(&btr_search_latch);
+
+	if (block->is_hashed && ((block->curr_n_fields != n_fields)
+				 || (block->curr_n_bytes != n_bytes)
+				 || (block->curr_left_side != left_side))) {
+
+		rw_lock_s_unlock(&btr_search_latch);
+
+		btr_search_drop_page_hash_index(block);
+	} else {
+		rw_lock_s_unlock(&btr_search_latch);
+	}
+
+	n_recs = page_get_n_recs(page);
+
+	if (n_recs == 0) {
+
+		return;
+	}
+
+	/* Check that the values for hash index build are sensible */
+
+	if (n_fields + n_bytes == 0) {
+
+		return;
+	}
+
+	if (dict_index_get_n_unique_in_tree(index) < n_fields
+	    || (dict_index_get_n_unique_in_tree(index) == n_fields
+		&& n_bytes > 0)) {
+		return;
+	}
+
+	/* Calculate and cache fold values and corresponding records into
+	an array for fast insertion to the hash index */
+
+	folds = mem_alloc(n_recs * sizeof(ulint));
+	recs = mem_alloc(n_recs * sizeof(rec_t*));
+
+	n_cached = 0;
+
+	index_id = btr_page_get_index_id(page);
+
+	rec = page_rec_get_next(page_get_infimum_rec(page));
+
+	offsets = rec_get_offsets(rec, index, offsets,
+				  n_fields + (n_bytes > 0), &heap);
+
+	if (!page_rec_is_supremum(rec)) {
+		ut_a(n_fields <= rec_offs_n_fields(offsets));
+
+		if (n_bytes > 0) {
+			ut_a(n_fields < rec_offs_n_fields(offsets));
+		}
+	}
+
+	fold = rec_fold(rec, offsets, n_fields, n_bytes, index_id);
+
+	if (left_side) {
+
+		folds[n_cached] = fold;
+		recs[n_cached] = rec;
+		n_cached++;
+	}
+
+	for (;;) {
+		next_rec = page_rec_get_next(rec);
+
+		if (page_rec_is_supremum(next_rec)) {
+
+			if (!left_side) {
+
+				folds[n_cached] = fold;
+				recs[n_cached] = rec;
+				n_cached++;
+			}
+
+			break;
+		}
+
+		offsets = rec_get_offsets(next_rec, index, offsets,
+					  n_fields + (n_bytes > 0), &heap);
+		next_fold = rec_fold(next_rec, offsets, n_fields,
+				     n_bytes, index_id);
+
+		if (fold != next_fold) {
+			/* Insert an entry into the hash index */
+
+			if (left_side) {
+
+				folds[n_cached] = next_fold;
+				recs[n_cached] = next_rec;
+				n_cached++;
+			} else {
+				folds[n_cached] = fold;
+				recs[n_cached] = rec;
+				n_cached++;
+			}
+		}
+
+		rec = next_rec;
+		fold = next_fold;
+	}
+
+	btr_search_check_free_space_in_heap();
+
+	rw_lock_x_lock(&btr_search_latch);
+
+	if (UNIV_UNLIKELY(!btr_search_enabled)) {
+		goto exit_func;
+	}
+
+	if (block->is_hashed && ((block->curr_n_fields != n_fields)
+				 || (block->curr_n_bytes != n_bytes)
+				 || (block->curr_left_side != left_side))) {
+		goto exit_func;
+	}
+
+	/* This counter is decremented every time we drop page
+	hash index entries and is incremented here. Since we can
+	rebuild hash index for a page that is already hashed, we
+	have to take care not to increment the counter in that
+	case. */
+	if (!block->is_hashed) {
+		index->search_info->ref_count++;
+	}
+
+	block->is_hashed = TRUE;
+	block->n_hash_helps = 0;
+
+	block->curr_n_fields = n_fields;
+	block->curr_n_bytes = n_bytes;
+	block->curr_left_side = left_side;
+	block->index = index;
+
+	for (i = 0; i < n_cached; i++) {
+
+		ha_insert_for_fold(table, folds[i], block, recs[i]);
+	}
+
+exit_func:
+	rw_lock_x_unlock(&btr_search_latch);
+
+	mem_free(folds);
+	mem_free(recs);
+	if (UNIV_LIKELY_NULL(heap)) {
+		mem_heap_free(heap);
+	}
+}
+
+/********************************************************************//**
+Moves or deletes hash entries for moved records. If new_page is already hashed,
+then the hash index for page, if any, is dropped. If new_page is not hashed,
+and page is hashed, then a new hash index is built to new_page with the same
+parameters as page (this often happens when a page is split). */
+UNIV_INTERN
+void
+btr_search_move_or_delete_hash_entries(
+/*===================================*/
+	buf_block_t*	new_block,	/*!< in: records are copied
+					to this page */
+	buf_block_t*	block,		/*!< in: index page from which
+					records were copied, and the
+					copied records will be deleted
+					from this page */
+	dict_index_t*	index)		/*!< in: record descriptor */
+{
+	ulint	n_fields;
+	ulint	n_bytes;
+	ibool	left_side;
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(rw_lock_own(&(block->lock), RW_LOCK_EX));
+	ut_ad(rw_lock_own(&(new_block->lock), RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+	ut_a(!new_block->is_hashed || new_block->index == index);
+	ut_a(!block->is_hashed || block->index == index);
+	ut_a(!(new_block->is_hashed || block->is_hashed)
+	     || !dict_index_is_ibuf(index));
+
+	rw_lock_s_lock(&btr_search_latch);
+
+	if (new_block->is_hashed) {
+
+		rw_lock_s_unlock(&btr_search_latch);
+
+		btr_search_drop_page_hash_index(block);
+
+		return;
+	}
+
+	if (block->is_hashed) {
+
+		n_fields = block->curr_n_fields;
+		n_bytes = block->curr_n_bytes;
+		left_side = block->curr_left_side;
+
+		new_block->n_fields = block->curr_n_fields;
+		new_block->n_bytes = block->curr_n_bytes;
+		new_block->left_side = left_side;
+
+		rw_lock_s_unlock(&btr_search_latch);
+
+		ut_a(n_fields + n_bytes > 0);
+
+		btr_search_build_page_hash_index(index, new_block, n_fields,
+						 n_bytes, left_side);
+		ut_ad(n_fields == block->curr_n_fields);
+		ut_ad(n_bytes == block->curr_n_bytes);
+		ut_ad(left_side == block->curr_left_side);
+		return;
+	}
+
+	rw_lock_s_unlock(&btr_search_latch);
+}
+
+/********************************************************************//**
+Updates the page hash index when a single record is deleted from a page. */
+UNIV_INTERN
+void
+btr_search_update_hash_on_delete(
+/*=============================*/
+	btr_cur_t*	cursor)	/*!< in: cursor which was positioned on the
+				record to delete using btr_cur_search_...,
+				the record is not yet deleted */
+{
+	hash_table_t*	table;
+	buf_block_t*	block;
+	rec_t*		rec;
+	ulint		fold;
+	dulint		index_id;
+	ibool		found;
+	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
+	mem_heap_t*	heap		= NULL;
+	rec_offs_init(offsets_);
+
+	rec = btr_cur_get_rec(cursor);
+
+	block = btr_cur_get_block(cursor);
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(rw_lock_own(&(block->lock), RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	if (!block->is_hashed) {
+
+		return;
+	}
+
+	ut_a(block->index == cursor->index);
+	ut_a(block->curr_n_fields + block->curr_n_bytes > 0);
+	ut_a(!dict_index_is_ibuf(cursor->index));
+
+	table = btr_search_sys->hash_index;
+
+	index_id = cursor->index->id;
+	fold = rec_fold(rec, rec_get_offsets(rec, cursor->index, offsets_,
+					     ULINT_UNDEFINED, &heap),
+			block->curr_n_fields, block->curr_n_bytes, index_id);
+	if (UNIV_LIKELY_NULL(heap)) {
+		mem_heap_free(heap);
+	}
+	rw_lock_x_lock(&btr_search_latch);
+
+	found = ha_search_and_delete_if_found(table, fold, rec);
+
+	rw_lock_x_unlock(&btr_search_latch);
+}
+
+/********************************************************************//**
+Updates the page hash index when a single record is inserted on a page. */
+UNIV_INTERN
+void
+btr_search_update_hash_node_on_insert(
+/*==================================*/
+	btr_cur_t*	cursor)	/*!< in: cursor which was positioned to the
+				place to insert using btr_cur_search_...,
+				and the new record has been inserted next
+				to the cursor */
+{
+	hash_table_t*	table;
+	buf_block_t*	block;
+	rec_t*		rec;
+
+	rec = btr_cur_get_rec(cursor);
+
+	block = btr_cur_get_block(cursor);
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(rw_lock_own(&(block->lock), RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	if (!block->is_hashed) {
+
+		return;
+	}
+
+	ut_a(block->index == cursor->index);
+	ut_a(!dict_index_is_ibuf(cursor->index));
+
+	rw_lock_x_lock(&btr_search_latch);
+
+	if ((cursor->flag == BTR_CUR_HASH)
+	    && (cursor->n_fields == block->curr_n_fields)
+	    && (cursor->n_bytes == block->curr_n_bytes)
+	    && !block->curr_left_side) {
+
+		table = btr_search_sys->hash_index;
+
+		ha_search_and_update_if_found(table, cursor->fold, rec,
+					      block, page_rec_get_next(rec));
+
+		rw_lock_x_unlock(&btr_search_latch);
+	} else {
+		rw_lock_x_unlock(&btr_search_latch);
+
+		btr_search_update_hash_on_insert(cursor);
+	}
+}
+
+/********************************************************************//**
+Updates the page hash index when a single record is inserted on a page. */
+UNIV_INTERN
+void
+btr_search_update_hash_on_insert(
+/*=============================*/
+	btr_cur_t*	cursor)	/*!< in: cursor which was positioned to the
+				place to insert using btr_cur_search_...,
+				and the new record has been inserted next
+				to the cursor */
+{
+	hash_table_t*	table;
+	buf_block_t*	block;
+	rec_t*		rec;
+	rec_t*		ins_rec;
+	rec_t*		next_rec;
+	dulint		index_id;
+	ulint		fold;
+	ulint		ins_fold;
+	ulint		next_fold = 0; /* remove warning (??? bug ???) */
+	ulint		n_fields;
+	ulint		n_bytes;
+	ibool		left_side;
+	ibool		locked		= FALSE;
+	mem_heap_t*	heap		= NULL;
+	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
+	ulint*		offsets		= offsets_;
+	rec_offs_init(offsets_);
+
+	table = btr_search_sys->hash_index;
+
+	btr_search_check_free_space_in_heap();
+
+	rec = btr_cur_get_rec(cursor);
+
+	block = btr_cur_get_block(cursor);
+
+#ifdef UNIV_SYNC_DEBUG
+	ut_ad(rw_lock_own(&(block->lock), RW_LOCK_EX));
+#endif /* UNIV_SYNC_DEBUG */
+
+	if (!block->is_hashed) {
+
+		return;
+	}
+
+	ut_a(block->index == cursor->index);
+	ut_a(!dict_index_is_ibuf(cursor->index));
+
+	index_id = cursor->index->id;
+
+	n_fields = block->curr_n_fields;
+	n_bytes = block->curr_n_bytes;
+	left_side = block->curr_left_side;
+
+	ins_rec = page_rec_get_next(rec);
+	next_rec = page_rec_get_next(ins_rec);
+
+	offsets = rec_get_offsets(ins_rec, cursor->index, offsets,
+				  ULINT_UNDEFINED, &heap);
+	ins_fold = rec_fold(ins_rec, offsets, n_fields, n_bytes, index_id);
+
+	if (!page_rec_is_supremum(next_rec)) {
+		offsets = rec_get_offsets(next_rec, cursor->index, offsets,
+					  n_fields + (n_bytes > 0), &heap);
+		next_fold = rec_fold(next_rec, offsets, n_fields,
+				     n_bytes, index_id);
+	}
+
+	if (!page_rec_is_infimum(rec)) {
+		offsets = rec_get_offsets(rec, cursor->index, offsets,
+					  n_fields + (n_bytes > 0), &heap);
+		fold = rec_fold(rec, offsets, n_fields, n_bytes, index_id);
+	} else {
+		if (left_side) {
+
+			rw_lock_x_lock(&btr_search_latch);
+
+			locked = TRUE;
+
+			ha_insert_for_fold(table, ins_fold, block, ins_rec);
+		}
+
+		goto check_next_rec;
+	}
+
+	if (fold != ins_fold) {
+
+		if (!locked) {
+
+			rw_lock_x_lock(&btr_search_latch);
+
+			locked = TRUE;
+		}
+
+		if (!left_side) {
+			ha_insert_for_fold(table, fold, block, rec);
+		} else {
+			ha_insert_for_fold(table, ins_fold, block, ins_rec);
+		}
+	}
+
+check_next_rec:
+	if (page_rec_is_supremum(next_rec)) {
+
+		if (!left_side) {
+
+			if (!locked) {
+				rw_lock_x_lock(&btr_search_latch);
+
+				locked = TRUE;
+			}
+
+			ha_insert_for_fold(table, ins_fold, block, ins_rec);
+		}
+
+		goto function_exit;
+	}
+
+	if (ins_fold != next_fold) {
+
+		if (!locked) {
+
+			rw_lock_x_lock(&btr_search_latch);
+
+			locked = TRUE;
+		}
+
+		if (!left_side) {
+
+			ha_insert_for_fold(table, ins_fold, block, ins_rec);
+			/*
+			ib_logger(ib_stream, "Hash insert for ");
+			dict_index_name_print(ib_stream, cursor->index);
+			ib_logger(ib_stream, " fold %lu\n", ins_fold);
+			*/
+		} else {
+			ha_insert_for_fold(table, next_fold, block, next_rec);
+		}
+	}
+
+function_exit:
+	if (UNIV_LIKELY_NULL(heap)) {
+		mem_heap_free(heap);
+	}
+	if (locked) {
+		rw_lock_x_unlock(&btr_search_latch);
+	}
+}
+
+/********************************************************************//**
+Validates the search system.
+@return	TRUE if ok */
+UNIV_INTERN
+ibool
+btr_search_validate(void)
+/*=====================*/
+{
+	ha_node_t*	node;
+	ulint		n_page_dumps	= 0;
+	ibool		ok		= TRUE;
+	ulint		i;
+	ulint		cell_count;
+	mem_heap_t*	heap		= NULL;
+	ulint		offsets_[REC_OFFS_NORMAL_SIZE];
+	ulint*		offsets		= offsets_;
+
+	/* How many cells to check before temporarily releasing
+	btr_search_latch. */
+	ulint		chunk_size = 10000;
+
+	rec_offs_init(offsets_);
+
+	rw_lock_x_lock(&btr_search_latch);
+	buf_pool_mutex_enter();
+
+	cell_count = hash_get_n_cells(btr_search_sys->hash_index);
+
+	for (i = 0; i < cell_count; i++) {
+		/* We release btr_search_latch every once in a while to
+		give other queries a chance to run. */
+		if ((i != 0) && ((i % chunk_size) == 0)) {
+			buf_pool_mutex_exit();
+			rw_lock_x_unlock(&btr_search_latch);
+			os_thread_yield();
+			rw_lock_x_lock(&btr_search_latch);
+			buf_pool_mutex_enter();
+		}
+
+		node = hash_get_nth_cell(btr_search_sys->hash_index, i)->node;
+
+		for (; node != NULL; node = node->next) {
+			const buf_block_t*	block
+				= buf_block_align(node->data);
+			const buf_block_t*	hash_block;
+
+			if (UNIV_LIKELY(buf_block_get_state(block)
+					== BUF_BLOCK_FILE_PAGE)) {
+
+				/* The space and offset are only valid
+				for file blocks.  It is possible that
+				the block is being freed
+				(BUF_BLOCK_REMOVE_HASH, see the
+				assertion and the comment below) */
+				hash_block = buf_block_hash_get(
+					buf_block_get_space(block),
+					buf_block_get_page_no(block));
+			} else {
+				hash_block = NULL;
+			}
+
+			if (hash_block) {
+				ut_a(hash_block == block);
+			} else {
+				/* When a block is being freed,
+				buf_LRU_search_and_free_block() first
+				removes the block from
+				buf_pool->page_hash by calling
+				buf_LRU_block_remove_hashed_page().
+				After that, it invokes
+				btr_search_drop_page_hash_index() to
+				remove the block from
+				btr_search_sys->hash_index. */
+
+				ut_a(buf_block_get_state(block)
+				     == BUF_BLOCK_REMOVE_HASH);
+			}
+
+			ut_a(!dict_index_is_ibuf(block->index));
+
+			offsets = rec_get_offsets((const rec_t*) node->data,
+						  block->index, offsets,
+						  block->curr_n_fields
+						  + (block->curr_n_bytes > 0),
+						  &heap);
+
+			if (!block->is_hashed || node->fold
+			    != rec_fold((rec_t*)(node->data),
+					offsets,
+					block->curr_n_fields,
+					block->curr_n_bytes,
+					btr_page_get_index_id(block->frame))) {
+				const page_t*	page = block->frame;
+
+				ok = FALSE;
+				ut_print_timestamp(ib_stream);
+
+				ib_logger(ib_stream,
+					"  InnoDB: Error in an adaptive hash"
+					" index pointer to page %lu\n"
+					"InnoDB: ptr mem address %p"
+					" index id %lu %lu,"
+					" node fold %lu, rec fold %lu\n",
+					(ulong) page_get_page_no(page),
+					node->data,
+					(ulong) ut_dulint_get_high(
+						btr_page_get_index_id(page)),
+					(ulong) ut_dulint_get_low(
+						btr_page_get_index_id(page)),
+					(ulong) node->fold,
+					(ulong) rec_fold((rec_t*)(node->data),
+							 offsets,
+							 block->curr_n_fields,
+							 block->curr_n_bytes,
+							 btr_page_get_index_id(
+								 page)));
+
+				ib_logger(ib_stream, "InnoDB: Record ");
+				rec_print_new(ib_stream, (rec_t*)node->data,
+					      offsets);
+				ib_logger(ib_stream, "\nInnoDB: on that page."
+					" Page mem address %p, is hashed %lu,"
+					" n fields %lu, n bytes %lu\n"
+					"InnoDB: side %lu\n",
+					(void*) page, (ulong) block->is_hashed,
+					(ulong) block->curr_n_fields,
+					(ulong) block->curr_n_bytes,
+					(ulong) block->curr_left_side);
+
+				if (n_page_dumps < 20) {
+					buf_page_print(page, 0);
+					n_page_dumps++;
+				}
+			}
+		}
+	}
+
+	for (i = 0; i < cell_count; i += chunk_size) {
+		ulint end_index = ut_min(i + chunk_size - 1, cell_count - 1);
+
+		/* We release btr_search_latch every once in a while to
+		give other queries a chance to run. */
+		if (i != 0) {
+			buf_pool_mutex_exit();
+			rw_lock_x_unlock(&btr_search_latch);
+			os_thread_yield();
+			rw_lock_x_lock(&btr_search_latch);
+			buf_pool_mutex_enter();
+		}
+
+		if (!ha_validate(btr_search_sys->hash_index, i, end_index)) {
+			ok = FALSE;
+		}
+	}
+
+	buf_pool_mutex_exit();
+	rw_lock_x_unlock(&btr_search_latch);
+	if (UNIV_LIKELY_NULL(heap)) {
+		mem_heap_free(heap);
+	}
+
+	return(ok);
+}
